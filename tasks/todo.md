@@ -40,14 +40,20 @@ Plan d'implementation base sur `jacquouille-orchestrator/docs/vellum-library-pla
 - [x] `tests/Vellum.Abstractions.Tests` — 5 smoke tests passent sur net8/9/10 (M8)
 
 ### 1.3 Vellum.Core
-- [ ] Porter `DekManager` depuis jacqcloud-buses
-- [ ] Generifier le scope (remplacer `Guid busId` par `string scope`)
-- [ ] Porter `PayloadEncryptor`
-- [ ] Adapter au nouveau `IKeyEncryptionProvider` abstrait
-- [ ] Options `VellumOptions` (DekCacheTtl, etc.)
-- [ ] Extension DI `AddVellum()`
-- [ ] Memory zeroing sur DEK apres usage
-- [ ] `ConfigureAwait(false)` partout
+- [x] Porter `DekManager` depuis jacqcloud-buses (sealed partial, primary ctor, LoggerMessage source gen)
+- [x] Generifier le scope (remplacer `Guid busId` par `string scope`)
+- [x] Porter `PayloadEncryptor` (self-contained envelope, AES-256-GCM)
+- [x] Adapter au nouveau `IKeyEncryptionProvider` abstrait
+- [x] Options `VellumOptions` (DekCacheTtl, default 30 min)
+- [x] Extension DI `AddVellum()` (TryAdd scoped lifetimes so EF Core store stays compatible)
+- [x] Memory zeroing sur DEK apres usage (Encrypt + Decrypt + CreateDek race loser)
+- [x] `ConfigureAwait(false)` partout
+- [x] Extend `Dek` to carry its `WrappedKey` — decided option (b) to avoid a redundant store round-trip on the encrypt hot path
+- [x] Cache-by-keyId key is scope-partitioned (`vellum:dek:id:{scope}:{keyId}`) — defense against cross-tenant cache poisoning (L15)
+- [x] `ValueTask<Dek>` sync-cache-hit on `GetActiveDekAsync` and `GetDekByKeyIdAsync` (hot path allocation-free)
+- [x] 4-layer race defense on `CreateDekAsync`: double-check + store-handles-uniqueness + winner-detection + unwrap-winner-if-race-lost-after-wrap
+- [x] `tests/Vellum.Core.Tests` — 24 tests (DekManager 12, PayloadEncryptor 9, AddVellum 3) all green on net10.0 (net8/9 compile clean; host lacks net8/9 runtime)
+- [x] `dotnet pack` produces Vellum.Core.0.1.0-preview.1.nupkg + snupkg (Source Link active via Directory.Build.props)
 
 ### 1.4 Vellum.Vault
 - [ ] Porter `VaultEncryptionService` depuis jacqcloud-buses

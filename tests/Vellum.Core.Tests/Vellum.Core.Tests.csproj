@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>Vellum.Tests</RootNamespace>
+    <AssemblyName>Vellum.Core.Tests</AssemblyName>
+    <!--
+      CA1707: underscores in test method names are idiomatic xUnit (Given_When_Then).
+      CA2007: test methods do not need ConfigureAwait — xUnit has no sync context.
+      CA2000: test-local MemoryCache / ServiceProvider lifetimes are managed by the test scope.
+      CA1515: test fakes are public so they can be instantiated by multiple test files; internals would require InternalsVisibleTo.
+      CA1822: instance vs static is not meaningful on test helper methods.
+    -->
+    <NoWarn>$(NoWarn);CA1707;CA2007;CA2000;CA1515;CA1822</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="NSubstitute" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Vellum.Core\Vellum.Core.csproj" />
+  </ItemGroup>
+
+</Project>

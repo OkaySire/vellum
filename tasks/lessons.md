@@ -149,6 +149,31 @@ public sealed partial class DekManager : IDekManager
 
 ---
 
+### L15 — Cache by opaque identifier doit etre partitionne par scope
+
+**Contexte** : `DekManager` caches unwrapped DEKs both by `scope` (for `GetActiveDekAsync`)
+and by `keyId` (for `GetDekByKeyIdAsync`). A first implementation used `$"dek-by-id:{keyId}"`
+as the cache key — no scope inside. Consequence: if tenant A fetches keyId X for scope
+`tenant:A`, that unwrapped DEK ends up in the cache. If tenant B later calls
+`GetDekByKeyIdAsync(X, "tenant:B")`, the cache hit fires BEFORE the scope check, and the
+method returns a plaintext DEK belonging to another tenant. The scope check on the slow path
+is not enough — the fast path short-circuits it.
+
+**Regle** : Tout cache qui indexe par identifiant opaque dans un contexte multi-tenant
+**doit** inclure le scope dans la cle de cache, pas seulement verifier le scope sur la
+slow path. Pour Vellum, c'est : `$"vellum:dek:id:{scope}:{keyId}"`.
+
+**Application** : `DekManager.BuildKeyIdCacheKey(Guid keyId, string scope)` inclut le scope
+— voir le test `GetDekByKeyIdAsync_CacheKey_IsScopePartitioned` qui pin le contrat.
+
+**Rationale** : Les lookups par identifiant sont vulnerables au guessing. Meme si un attaquant
+ne peut pas lire la DB pour extraire un `keyId`, un leak via logs / metrics / debug dumps / URLs
+est realiste. Si le cache est scope-partitionne, un attaquant qui devine le keyId d'un autre
+tenant ne peut **pas** le recuperer — le cache va miss, la store va miss (elle verifie aussi
+le scope), et la requete echoue fail-closed.
+
+---
+
 ### L14 — ProviderVersion doit etre `string`, pas `int`, pour portabilite cloud
 
 **Regle** : Tout champ qui identifie une version/ARN/path d'une cle KEK doit etre `string`, jamais `int`. Les providers cloud ne rentrent pas dans un int :

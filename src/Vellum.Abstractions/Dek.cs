@@ -13,6 +13,12 @@ namespace Vellum;
 /// (<see cref="IDekManager.GetDekByKeyIdAsync(System.Guid, string, System.Threading.CancellationToken)"/>).
 /// </para>
 /// <para>
+/// <b>Self-contained for encryption.</b> The <see cref="WrappedKey"/> companion field bundles the
+/// KEK-wrapped form of the same DEK, so that the caller can produce a self-contained
+/// <see cref="EncryptedPayload"/> without an extra round-trip to <see cref="IEncryptionKeyStore"/>.
+/// This matches the AWS Encryption SDK / Google Tink envelope design.
+/// </para>
+/// <para>
 /// <b>Memory hygiene.</b> The <see cref="Key"/> array contains sensitive plaintext key material.
 /// Callers should treat it as short-lived and zero it out after use
 /// (for example, via <see cref="System.Security.Cryptography.CryptographicOperations.ZeroMemory(System.Span{byte})"/>).
@@ -25,8 +31,9 @@ namespace Vellum;
 /// </remarks>
 /// <param name="Key">Plaintext DEK bytes (typically a 256-bit AES key). Callers own this array and should zero it after use.</param>
 /// <param name="KeyId">Identifier of the key, used to locate the corresponding <see cref="EncryptionKey"/> record when decrypting.</param>
+/// <param name="WrappedKey">The KEK-wrapped form of the same DEK, as returned by <see cref="IKeyEncryptionProvider.WrapAsync(System.ReadOnlyMemory{byte}, System.Threading.CancellationToken)"/>. Carried alongside the plaintext so that encryption can produce a self-contained envelope without a redundant store lookup.</param>
 [SuppressMessage(
     "Performance",
     "CA1819:Properties should not return arrays",
     Justification = "Dek carries mutable key material by design so that callers can zero memory after use. ReadOnlyMemory<byte> would prevent callers from scrubbing the underlying storage.")]
-public sealed record Dek(byte[] Key, Guid KeyId);
+public sealed record Dek(byte[] Key, Guid KeyId, WrappedKey WrappedKey);

@@ -72,7 +72,8 @@ public sealed class AbstractionsSmokeTests
             keyBytes[i] = (byte)i;
         }
 
-        Dek dek = new(keyBytes, Guid.NewGuid());
+        WrappedKey wrapped = new("vault:v1:abc", "1");
+        Dek dek = new(keyBytes, Guid.NewGuid(), wrapped);
         ReferenceEquals(dek.Key, keyBytes).Should().BeTrue("Dek must store the array by reference");
 
         // Mutate the original array and verify the Dek reflects the change.
