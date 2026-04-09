@@ -1,0 +1,176 @@
+# Vellum — TODO
+
+Plan d'implementation base sur `jacquouille-orchestrator/docs/vellum-library-plan.md`.
+
+## Phase 1 — Core MVP
+
+### 1.1 Solution scaffold
+- [x] Creer `Vellum.slnx` (format .NET 10 par defaut)
+- [x] Structure `src/` avec sous-dossiers par package
+- [x] Structure `tests/` (vide, projets a ajouter par package)
+- [x] Structure `samples/` (vide, sample a ajouter)
+- [x] `Directory.Build.props` commun (nullable, langversion, TWarnings=error, analyzers AllEnabled)
+- [x] `Directory.Packages.props` pour central package management
+- [x] `.editorconfig` (naming, explicit types, sealed, CA2007/CA1848/CA1852 en error/warning)
+- [x] `global.json` (SDK 10.0.104, rollForward latestFeature)
+- [x] `.gitignore` .NET
+- [x] `NuGet.config` (pin nuget.org, evite NU1507)
+- [x] `LICENSE` (Apache 2.0)
+- [x] `README.md` initial
+- [x] `CHANGELOG.md` initial
+- [x] `SECURITY.md`
+- [x] `CONTRIBUTING.md`
+
+### 1.2 Vellum.Abstractions
+- [x] Interface `IKeyEncryptionProvider`
+- [x] Interface `IEncryptionKeyStore`
+- [x] Interface `IDekManager`
+- [x] Interface `IPayloadEncryptor`
+- [x] Record `EncryptionKey`
+- [x] Record `ActiveDek`
+- [x] Record `EncryptedPayload`
+- [x] Record `WrappedKey`
+- [x] Record `PayloadEncryptionResult`
+- [x] XML docs sur tous les publics
+- [x] Package metadata (authors, description, tags, repo url)
+- [x] Build clean multi-target net8.0;net9.0;net10.0, zero warning avec TreatWarningsAsErrors=true
+
+### 1.3 Vellum.Core
+- [ ] Porter `DekManager` depuis jacqcloud-buses
+- [ ] Generifier le scope (remplacer `Guid busId` par `string scope`)
+- [ ] Porter `PayloadEncryptor`
+- [ ] Adapter au nouveau `IKeyEncryptionProvider` abstrait
+- [ ] Options `VellumOptions` (DekCacheTtl, etc.)
+- [ ] Extension DI `AddVellum()`
+- [ ] Memory zeroing sur DEK apres usage
+- [ ] `ConfigureAwait(false)` partout
+
+### 1.4 Vellum.Vault
+- [ ] Porter `VaultEncryptionService` depuis jacqcloud-buses
+- [ ] Refactor en `VaultKeyEncryptionProvider` implementant `IKeyEncryptionProvider`
+- [ ] Options `VaultOptions` (Address, Token, KeyName)
+- [ ] Extension DI `AddVaultProvider()`
+- [ ] HttpClient typed, retry policy (Polly ou manuel)
+- [ ] Parser la version Vault depuis le ciphertext (`vault:v{N}:...`)
+
+### 1.5 Vellum.Static (dev only)
+- [ ] `StaticKeyEncryptionProvider` implementant `IKeyEncryptionProvider`
+- [ ] KEK depuis config (AES-256 key en base64)
+- [ ] Extension DI `AddStaticProvider()`
+- [ ] WARNINGS massifs dans XML docs et README : "INSECURE, dev only"
+- [ ] Log warning au demarrage si utilise
+
+### 1.6 Vellum.InMemory
+- [ ] `InMemoryEncryptionKeyStore` implementant `IEncryptionKeyStore`
+- [ ] Thread-safe (ConcurrentDictionary)
+- [ ] Extension DI `AddInMemoryStore()`
+
+### 1.7 Vellum.EntityFrameworkCore
+- [ ] Porter `BusEncryptionKeyRepository` depuis jacqcloud-buses
+- [ ] Refactor en `EfCoreEncryptionKeyStore<TContext>`
+- [ ] Entity `EncryptionKey` configurable (pas lie a un schema specifique)
+- [ ] `IgnoreQueryFilters()` preserve
+- [ ] Double-check + unique index pattern preserve (lecon v0.1.60-v0.1.63)
+- [ ] Migrations EF Core (PostgreSQL + SQL Server + SQLite)
+- [ ] Extension DI `AddEntityFrameworkCoreStore<TContext>()`
+
+### 1.8 Tests
+- [ ] `Vellum.Abstractions.Tests` (value objects, records)
+- [ ] `Vellum.Core.Tests` (porter les tests DekManager + PayloadEncryptor)
+- [ ] `Vellum.Vault.Tests` (porter VaultEncryptionServiceTests)
+- [ ] `Vellum.Static.Tests`
+- [ ] `Vellum.InMemory.Tests`
+- [ ] `Vellum.EntityFrameworkCore.Tests` (TestContainers PostgreSQL)
+- [ ] Tests de roundtrip encrypt/decrypt sur toutes les combinaisons provider + store
+- [ ] Tests concurrents DEK creation (race conditions)
+
+### 1.9 CI/CD
+- [ ] GitHub Actions workflow (`build.yml`)
+- [ ] Multi-target: net8.0, net9.0, net10.0
+- [ ] Matrix OS: ubuntu, windows, macos
+- [ ] `dotnet format --verify-no-changes`
+- [ ] `dotnet test` avec coverage
+- [ ] `dotnet pack` pour tous les packages
+- [ ] Upload packages en artifacts
+- [ ] Workflow `release.yml` declenche sur tag `v*`
+
+### 1.10 Documentation
+- [ ] README.md complet avec quickstart
+- [ ] API docs genere depuis XML (DocFX ou similaire)
+- [ ] Sample app `samples/Vellum.Sample.AspNetCore` (Vault + EF + docker-compose)
+- [ ] Diagrammes architecture
+
+---
+
+## Phase 2 — Dogfood in Jacquouille
+
+- [ ] Ajouter reference Vellum dans `jacqcloud-buses`
+- [ ] Remplacer le code Encryption actuel par les packages Vellum
+- [ ] Adapter `BusEncryptionKeyRepository` → implementer `IEncryptionKeyStore`
+- [ ] Migration EF Core (renommer table si necessaire)
+- [ ] Tests d'integration passent
+- [ ] Benchmarks avant/apres (BenchmarkDotNet)
+- [ ] 30 jours en production sans incident
+
+---
+
+## Phase 3 — Cloud providers
+
+### Vellum.AzureKeyVault
+- [ ] `AzureKeyVaultProvider` implementant `IKeyEncryptionProvider`
+- [ ] Auth via `DefaultAzureCredential`
+- [ ] Tests integration
+- [ ] Docs
+
+### Vellum.AwsKms
+- [ ] `AwsKmsProvider` implementant `IKeyEncryptionProvider`
+- [ ] Auth via AWS SDK default chain
+- [ ] Tests integration (localstack)
+- [ ] Docs
+
+### Vellum.GcpKms
+- [ ] `GcpKmsProvider` implementant `IKeyEncryptionProvider`
+- [ ] Auth via Application Default Credentials
+- [ ] Tests integration
+- [ ] Docs
+
+---
+
+## Phase 4 — Rotation and hosting
+
+### Vellum.Rotation
+- [ ] `DekRotationHostedService` (porter depuis DekRotationBackgroundService)
+- [ ] Options `RotationOptions` (Interval, ScopesToRotate)
+- [ ] Extension DI `AddVellumRotation()`
+- [ ] Tests
+
+### Vellum.AspNetCore
+- [ ] Extensions DI supplementaires
+- [ ] Health checks (provider + store accessibles)
+- [ ] `ActivitySource` pour OpenTelemetry tracing
+- [ ] `Meter` pour metriques (counts, latencies, errors)
+
+---
+
+## Phase 5 — Hardening for 1.0
+
+- [ ] `pg_advisory_xact_lock` pour DEK creation (DEK-LOCK backlog)
+- [ ] Property-based tests (FsCheck) — roundtrip encrypt/decrypt
+- [ ] Fuzzing harness sur input untrusted (nonce, ciphertext)
+- [ ] Threat model document
+- [ ] External crypto audit
+- [ ] Benchmarks publics (BenchmarkDotNet)
+- [ ] Migration guide depuis `Microsoft.AspNetCore.DataProtection`
+- [ ] Migration guide depuis `AWS Encryption SDK`
+- [ ] Sample apps par provider
+
+---
+
+## Release
+
+- [ ] Reserver tous les noms NuGet (packages vides si besoin)
+- [ ] Creer GitHub org (jacqcloud ou vellum-dotnet)
+- [ ] `0.1.0-preview` sur NuGet
+- [ ] Blog post annonce
+- [ ] Audit crypto externe
+- [ ] `1.0.0` GA

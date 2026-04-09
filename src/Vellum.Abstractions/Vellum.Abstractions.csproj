@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Vellum</RootNamespace>
+    <AssemblyName>Vellum.Abstractions</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>Vellum.Abstractions</PackageId>
+    <Description>Core interfaces and value objects for Vellum, a provider-agnostic envelope encryption library for .NET. Zero dependencies.</Description>
+  </PropertyGroup>
+
+</Project>
