@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Vellum.InMemory</RootNamespace>
+    <AssemblyName>Vellum.InMemory</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>Vellum.InMemory</PackageId>
+    <Description>In-memory IEncryptionKeyStore implementation for Vellum, intended for tests, samples, and development. Thread-safe, enforces a single active Data Encryption Key per scope. No persistence — state is lost on process restart. Do not use in production.</Description>
+    <PackageTags>vellum;envelope-encryption;dek;kek;in-memory;testing;development</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Vellum.Abstractions\Vellum.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+  </ItemGroup>
+
+</Project>

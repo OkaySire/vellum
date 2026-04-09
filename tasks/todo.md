@@ -89,9 +89,15 @@ Plan d'implementation base sur `jacquouille-orchestrator/docs/vellum-library-pla
 - [x] Regression check: Phase 1.2 (5) + 1.3 (24) + 1.4 (30) + 1.5 (24) = **83/83 tests** verts sur net10.0
 
 ### 1.6 Vellum.InMemory
-- [ ] `InMemoryEncryptionKeyStore` implementant `IEncryptionKeyStore`
-- [ ] Thread-safe (ConcurrentDictionary)
-- [ ] Extension DI `AddInMemoryStore()`
+- [x] `InMemoryEncryptionKeyStore` implementant `IEncryptionKeyStore` (sealed, full contract: GetActive, GetById with scope-check, Create race-safe, DeactivateAll, GetHistorical sorted desc, GetActiveScopes)
+- [x] Thread-safe: lock-free reads on ConcurrentDictionary, global write-lock to enforce the one-active-key-per-scope invariant (simpler than per-scope SemaphoreSlim — contention is negligible in dev/test workloads, documented in the XML remarks)
+- [x] `CreateAsync` returns the winner on race (per IEncryptionKeyStore contract) — matches the FakeEncryptionKeyStore semantics DekManager's 4-layer defense relies on
+- [x] `GetByIdAsync` enforces scope equality (M1 multi-tenant defense — returns null on mismatch, never leaks a key across scopes)
+- [x] Extension DI `AddInMemoryStore()` — Singleton (L16 does not apply: no HttpClient, no DbContext, and in-memory state is meant to be shared across DI scopes)
+- [x] `tests/Vellum.InMemory.Tests` — 30 tests verts sur net10.0 (Store 24 + ServiceCollection 6, including 3 concurrent tests: 10-way same-scope race, read/write no-exceptions, 20-scope isolation)
+- [x] `dotnet pack` produit Vellum.InMemory.0.1.0-preview.1.nupkg (23K) + snupkg (27K) — Source Link actif
+- [x] Build clean multi-target net8.0;net9.0;net10.0, 0 warning, 0 error
+- [x] Regression check: Phase 1.2 (5) + 1.3 (24) + 1.4 (30) + 1.5 (24) + 1.6 (30) = **113/113 tests** verts sur net10.0
 
 ### 1.7 Vellum.EntityFrameworkCore
 - [ ] Porter `BusEncryptionKeyRepository` depuis jacqcloud-buses
