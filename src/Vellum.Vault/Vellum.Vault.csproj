@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Vellum.Vault</RootNamespace>
+    <AssemblyName>Vellum.Vault</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>Vellum.Vault</PackageId>
+    <Description>HashiCorp Vault Transit key encryption provider for Vellum. Wraps and unwraps Data Encryption Keys via the Vault Transit Secrets Engine. Couples only to Vellum.Abstractions — no dependency on Vellum.Core.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Vellum.Abstractions\Vellum.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+</Project>

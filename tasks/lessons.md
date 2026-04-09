@@ -174,6 +174,56 @@ le scope), et la requete echoue fail-closed.
 
 ---
 
+### L16 — Typed HttpClient expose via bridge : Transient, pas Singleton
+
+**Contexte** : En Phase 1.4 (Vellum.Vault), le brief de l'orchestrateur recommandait de bridger
+`IKeyEncryptionProvider` vers le typed client `VaultKeyEncryptionProvider` via
+`services.TryAddSingleton<IKeyEncryptionProvider>(sp => sp.GetRequiredService<VaultKeyEncryptionProvider>())`.
+Problème : `AddHttpClient<TClient>` enregistre `TClient` en **Transient** pour une raison
+précise — la rotation des handlers. `IHttpClientFactory` rotate l'inner `HttpMessageHandler`
+toutes les 2 minutes par défaut (pour repérer les changements DNS). Si on capture un
+`VaultKeyEncryptionProvider` singleton, il conserve à vie le `HttpClient` qui pointe vers un
+handler qui sera un jour disposed (ou pointera vers une IP DNS périmée).
+
+**Regle** : Le bridge doit respecter le lifetime du typed client. Comme
+`AddHttpClient<TClient>` enregistre `TClient` transient, on fait
+`services.TryAddTransient<IKeyEncryptionProvider>(sp => sp.GetRequiredService<VaultKeyEncryptionProvider>())`.
+Chaque résolution via le DI obtient une nouvelle instance du provider avec un `HttpClient`
+frais de la factory.
+
+**Application** : `src/Vellum.Vault/VaultServiceCollectionExtensions.cs:56` — deviation
+documentée du brief. Même pattern pour AzureKeyVault / AwsKms / GcpKms (Phase 3) :
+typed HttpClient + bridge transient, jamais singleton.
+
+**Rationale** : Le pattern "inject HttpClient via typed client" est fondamentalement transient.
+Singleton + typed client = mémoire qui explose (via handler pool rétention) ou DNS obsolète.
+Si un futur besoin exige singleton (par ex. état coûteux à construire), alors injecter
+`IHttpClientFactory` et `CreateClient()` à chaque appel — mais pas via le pattern typed.
+
+---
+
+### L17 — `Uri.ToString()` décanonicalise `%20` → espace (piège de test d'URL)
+
+**Contexte** : Un test Phase 1.4 vérifiait que `Uri.EscapeDataString("my key/with spaces")`
+produit `my%20key%2Fwith%20spaces` dans l'URL envoyée à Vault. Le test comparait
+`request.RequestUri!.ToString()` à `"http://vault.test:8200/v1/transit/encrypt/my%20key%2Fwith%20spaces"`
+et échouait parce que `Uri.ToString()` affichait `"my key%2Fwith spaces"` — les `%20` avaient
+été décodés en espaces littéraux pour l'affichage, tandis que `%2F` (slash) restait escape
+parce que `/` est un caractère réservé du path.
+
+**Regle** : Pour vérifier la forme **on-the-wire** d'une URL dans un test, toujours utiliser
+`Uri.AbsoluteUri` (ou `Uri.PathAndQuery` pour la partie relative), **jamais** `Uri.ToString()`.
+`ToString()` est le formulaire d'affichage humain qui canonicalise les sequences %HH "sures".
+
+**Application** : `tests/Vellum.Vault.Tests/VaultKeyEncryptionProviderTests.cs:112` —
+`handler.CapturedRequests[0].RequestUri!.AbsoluteUri.Should().Be(...)` et non `.ToString()`.
+
+**Rationale** : Ce qui compte en sécurité URL est la forme envoyée sur le réseau, pas
+l'affichage. `AbsoluteUri` garantit la forme encodée identique à ce que le serveur reçoit.
+Si un test passe avec `ToString()`, il ne valide rien du comportement réel du client HTTP.
+
+---
+
 ### L14 — ProviderVersion doit etre `string`, pas `int`, pour portabilite cloud
 
 **Regle** : Tout champ qui identifie une version/ARN/path d'une cle KEK doit etre `string`, jamais `int`. Les providers cloud ne rentrent pas dans un int :

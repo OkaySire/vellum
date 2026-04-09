@@ -56,12 +56,21 @@ Plan d'implementation base sur `jacquouille-orchestrator/docs/vellum-library-pla
 - [x] `dotnet pack` produces Vellum.Core.0.1.0-preview.1.nupkg + snupkg (Source Link active via Directory.Build.props)
 
 ### 1.4 Vellum.Vault
-- [ ] Porter `VaultEncryptionService` depuis jacqcloud-buses
-- [ ] Refactor en `VaultKeyEncryptionProvider` implementant `IKeyEncryptionProvider`
-- [ ] Options `VaultOptions` (Address, Token, KeyName)
-- [ ] Extension DI `AddVaultProvider()`
-- [ ] HttpClient typed, retry policy (Polly ou manuel)
-- [ ] Parser la version Vault depuis le ciphertext (`vault:v{N}:...`)
+- [x] Porter `VaultEncryptionService` depuis jacqcloud-buses (wrap/unwrap path uniquement, AES-GCM payload reste dans Vellum.Core.PayloadEncryptor)
+- [x] Refactor en `VaultKeyEncryptionProvider : IKeyEncryptionProvider` (sealed partial, primary ctor, LoggerMessage)
+- [x] Options `VaultOptions` (Address, Token, KeyName, HttpTimeout)
+- [x] Validateur `IValidateOptions<VaultOptions>` + `ValidateOnStart()` — fail fast en config invalide
+- [x] Extension DI `AddVaultProvider(Action<VaultOptions>)`
+- [x] HttpClient typed (`AddHttpClient<VaultKeyEncryptionProvider>`), BaseAddress + Timeout + X-Vault-Token configurés
+- [x] `IKeyEncryptionProvider` exposé via `TryAddTransient` (deviation du brief Singleton — voir L16, lifetime aligné sur la typed-client transient pour préserver la rotation des handlers)
+- [x] DTOs records dans `Internal/` (Encrypt/Decrypt Request/Response/ResponseData) + `VaultJsonContext` source-gen pour JSON sans reflection
+- [x] Parser robuste de la version `vault:v{N}:...` (ExtractProviderVersion — bornes explicites, pas IndexOf fragile)
+- [x] `ProviderVersion` retourné verbatim au format `v{N}` pour préserver le sémantique Vault
+- [x] Fail closed sur tous les paths d'erreur (HTTP non-2xx, JSON malformé, base64 malformé, ciphertext null/vide)
+- [x] Token jamais loggé — vérifié dans tous les `[LoggerMessage]`
+- [x] `tests/Vellum.Vault.Tests` — 30 tests verts sur net10.0 (Provider 22 + ServiceCollection 8)
+- [x] `dotnet pack` produit Vellum.Vault.0.1.0-preview.1.nupkg (68K) + snupkg (72K) — Source Link actif
+- [x] Build clean multi-target net8.0;net9.0;net10.0, 0 warning, 0 error
 
 ### 1.5 Vellum.Static (dev only)
 - [ ] `StaticKeyEncryptionProvider` implementant `IKeyEncryptionProvider`

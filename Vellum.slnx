@@ -2,9 +2,11 @@
   <Folder Name="/src/">
     <Project Path="src/Vellum.Abstractions/Vellum.Abstractions.csproj" />
     <Project Path="src/Vellum.Core/Vellum.Core.csproj" />
+    <Project Path="src/Vellum.Vault/Vellum.Vault.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Vellum.Abstractions.Tests/Vellum.Abstractions.Tests.csproj" />
     <Project Path="tests/Vellum.Core.Tests/Vellum.Core.Tests.csproj" />
+    <Project Path="tests/Vellum.Vault.Tests/Vellum.Vault.Tests.csproj" />
   </Folder>
 </Solution>
