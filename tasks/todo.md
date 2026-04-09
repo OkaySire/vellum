@@ -73,11 +73,20 @@ Plan d'implementation base sur `jacquouille-orchestrator/docs/vellum-library-pla
 - [x] Build clean multi-target net8.0;net9.0;net10.0, 0 warning, 0 error
 
 ### 1.5 Vellum.Static (dev only)
-- [ ] `StaticKeyEncryptionProvider` implementant `IKeyEncryptionProvider`
-- [ ] KEK depuis config (AES-256 key en base64)
-- [ ] Extension DI `AddStaticProvider()`
-- [ ] WARNINGS massifs dans XML docs et README : "INSECURE, dev only"
-- [ ] Log warning au demarrage si utilise
+- [x] `StaticKeyEncryptionProvider : IKeyEncryptionProvider` (sealed partial, LoggerMessage, startup warning Interlocked once-per-instance)
+- [x] KEK depuis config via `StaticOptions.Base64Key` (AES-256 = 32 bytes)
+- [x] Wrap format self-contained `static:v1:base64(nonce‖ciphertext‖tag)` — stateless unwrap
+- [x] `StaticOptionsValidator : IValidateOptions<StaticOptions>` + `ValidateOnStart()` — rejette empty/invalid-base64/wrong-size sans jamais logger la clef
+- [x] Extension DI `AddStaticProvider(Action<StaticOptions>)` — bridge Singleton (pas de HttpClient, L16 n'applique pas)
+- [x] CA1716 (namespace "Static" = VB keyword) suppressed dans le csproj — accepté pour clarté du nom de package
+- [x] CA1812 suppressed via `[SuppressMessage]` sur `StaticOptionsValidator` (DI-instantiated via `TryAddEnumerable` type-param overload)
+- [x] WARNINGS massifs: `<Description>` NuGet, XML docs `⚠️ DEVELOPMENT USE ONLY ⚠️` sur class + extension, runtime WARNING log
+- [x] Fail closed sur tous les paths: prefix invalide, base64 invalide, blob trop court, tag mismatch (AES-GCM), DEK vide, decoded key wrong length
+- [x] `CryptographicOperations.ZeroMemory(kek)` dans `finally` pour wrap + unwrap
+- [x] `tests/Vellum.Static.Tests` — 24 tests verts sur net10.0 (Provider 13 + ServiceCollection 11)
+- [x] `dotnet pack` produit Vellum.Static.0.1.0-preview.1.nupkg (32K) + snupkg (30K) — Source Link actif, description contient ⚠️ DEVELOPMENT USE ONLY
+- [x] Build clean multi-target net8.0;net9.0;net10.0, 0 warning, 0 error
+- [x] Regression check: Phase 1.2 (5) + 1.3 (24) + 1.4 (30) + 1.5 (24) = **83/83 tests** verts sur net10.0
 
 ### 1.6 Vellum.InMemory
 - [ ] `InMemoryEncryptionKeyStore` implementant `IEncryptionKeyStore`

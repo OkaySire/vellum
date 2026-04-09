@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Vellum.Static</RootNamespace>
+    <AssemblyName>Vellum.Static</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>Vellum.Static</PackageId>
+    <Description>⚠️ DEVELOPMENT USE ONLY ⚠️ A static-key Key Encryption Provider for Vellum, intended exclusively for local development, tests, and samples. Wraps and unwraps Data Encryption Keys with an AES-256-GCM key loaded from configuration. NEVER use this package in production — the KEK lives next to the application and has the same security as the config file it came from.</Description>
+    <PackageTags>vellum;envelope-encryption;dek;kek;aes-gcm;development;testing;insecure</PackageTags>
+    <!--
+      CA1716: the namespace segment "Static" collides with the VB reserved keyword 'Static'.
+      The package name "Vellum.Static" is intentional and user-facing (it signals dev-only at a
+      glance), so we accept the VB interop wart in exchange for the clearer NuGet package name.
+    -->
+    <NoWarn>$(NoWarn);CA1716</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Vellum.Abstractions\Vellum.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+</Project>

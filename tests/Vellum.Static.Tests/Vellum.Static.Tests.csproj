@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>Vellum.Static.Tests</RootNamespace>
+    <AssemblyName>Vellum.Static.Tests</AssemblyName>
+    <!--
+      CA1707: underscores in test method names are idiomatic xUnit (Given_When_Then).
+      CA2007: test methods do not need ConfigureAwait.
+      CA1515: test helpers are public so they can be shared across files.
+      CA1716: "Static" namespace is intentional (matches the package name).
+      CA1822: instance vs static is not meaningful on test helpers.
+      CA5394: RandomNumberGenerator vs Random — tests deliberately use deterministic arrays.
+      CA1034: nested LogEntry record on the test-only CapturingLogger is intentional (scoped).
+    -->
+    <NoWarn>$(NoWarn);CA1707;CA2007;CA1515;CA1716;CA1822;CA5394;CA1034</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Vellum.Static\Vellum.Static.csproj" />
+  </ItemGroup>
+
+</Project>

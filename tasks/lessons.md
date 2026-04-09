@@ -224,6 +224,86 @@ Si un test passe avec `ToString()`, il ne valide rien du comportement réel du c
 
 ---
 
+### L18 — `TryAddEnumerable` factory-overload = "indistinguishable" error
+
+**Contexte** : En Phase 1.5 (Vellum.Static), pour contourner CA1812 sur `StaticOptionsValidator`
+(internal class non-détecté comme instancié par l'analyzer), j'ai tenté la factory-overload :
+```csharp
+services.TryAddEnumerable(
+    ServiceDescriptor.Singleton<IValidateOptions<StaticOptions>>(_ => new StaticOptionsValidator()));
+```
+L'analyzer voyait le `new`, CA1812 était heureux. Mais à l'exécution, `TryAddEnumerable` jette
+`System.ArgumentException: Implementation type cannot be 'IValidateOptions<StaticOptions>'
+because it is indistinguishable from other services registered for 'IValidateOptions<StaticOptions>'.`
+
+**Regle** : `TryAddEnumerable` **exige** un `implementationType` distinct (type-parameter overload
+`TryAddEnumerable(ServiceDescriptor.Singleton<TService, TImpl>())` ou
+`ServiceDescriptor.Singleton<TService>(typeof(TImpl))`). Il utilise
+`ImplementationType` pour dédupliquer les registrations et la factory-overload laisse ce champ
+null — rendant la registration "indistinguable" des autres et refusée.
+
+**Application** : pour contourner CA1812 sur un validator DI-instancié, utiliser la type-param
+overload et suppresser CA1812 via `[SuppressMessage("Performance", "CA1812", Justification = …)]`
+sur la classe validator. Voir `src/Vellum.Static/Internal/StaticOptionsValidator.cs` et la
+registration dans `StaticServiceCollectionExtensions.cs`.
+
+**Rationale** : `TryAddEnumerable` est conçu pour les patterns "plusieurs implémentations distinctes
+du même service" (e.g. plusieurs `IValidateOptions<T>`) et la déduplication repose sur le type
+concret. Une factory anonyme n'a pas d'identité typée — le container ne peut pas savoir si une
+factory équivalente existe déjà et il refuse plutôt que de permettre des doublons silencieux.
+
+---
+
+### L19 — Namespace `Vellum.Static` et CA1716 (VB keyword collision)
+
+**Contexte** : Le package `Vellum.Static` fait collision avec le keyword VB `Static`. CA1716
+déclenche au build. On ne peut pas renommer le package (le nom est visible aux consommateurs
+et communique l'intention "dev-only"), et on ne peut pas renommer que la namespace sans rendre
+le DI moins évident (`Vellum.Providers.Static.AddStaticProvider` reste collision-aware).
+
+**Regle** : Quand un nom de package contient intentionnellement un mot réservé d'un autre
+langage .NET (VB, F#, …), suppresser CA1716 via `<NoWarn>$(NoWarn);CA1716</NoWarn>` au
+niveau du csproj et documenter le raisonnement dans un commentaire XML du même bloc.
+Ne PAS suppresser globalement dans `Directory.Build.props` — la suppression doit rester
+locale au package concerné.
+
+**Application** : `src/Vellum.Static/Vellum.Static.csproj` `<NoWarn>` avec commentaire explicite.
+
+**Rationale** : CA1716 protège la cohabitation cross-langage, mais pour les packages dev-only
+où le nom porte un message sémantique (`Vellum.Static` = « attention dev »), le wart d'interop
+VB est accepté. La suppression locale évite de relaxer la règle globalement.
+
+---
+
+### L20 — Tester `ValidateOnStart()` sans dépendance Microsoft.Extensions.Hosting
+
+**Contexte** : En Phase 1.5, vouloir tester que `ValidateOnStart()` est correctement câblé
+dans l'extension DI. Le réflexe est de créer un `HostApplicationBuilder` et d'appeler `host.StartAsync()` —
+mais cela fait dépendre le projet de test de `Microsoft.Extensions.Hosting` (un gros package
+avec Hosted Services, Lifetime, etc.), ajoutant une dépendance non-nécessaire à un projet de test
+unitaire qui ne veut tester qu'une chose : "la validation run-on-start est câblée".
+
+**Regle** : Tester `ValidateOnStart()` via `IStartupValidator` directement, sans Host :
+```csharp
+using ServiceProvider sp = services.BuildServiceProvider();
+IStartupValidator validator = sp.GetRequiredService<IStartupValidator>();
+Action act = validator.Validate;
+act.Should().Throw<OptionsValidationException>();
+```
+`IStartupValidator` est public dans `Microsoft.Extensions.Options` (pas `Hosting`). Il est enregistré
+par `.ValidateOnStart()` et est exactement ce que `HostedServiceExecutor` appelle au démarrage.
+Pas de Host = test isolé, pas de surface de dépendance.
+
+**Application** : `tests/Vellum.Static.Tests/StaticServiceCollectionExtensionsTests.cs`
+`AddStaticProvider_ValidateOnStart_RegistersStartupValidator`.
+
+**Rationale** : Le test valide le contrat ("cette extension appelle `.ValidateOnStart()`")
+et le comportement observable ("l'IStartupValidator jette sur config invalide"), sans ramener
+toute la machinerie de Hosting. Plus rapide à compiler, plus facile à comprendre, et portable
+à tout projet de test qui ne veut pas `Microsoft.Extensions.Hosting`.
+
+---
+
 ### L14 — ProviderVersion doit etre `string`, pas `int`, pour portabilite cloud
 
 **Regle** : Tout champ qui identifie une version/ARN/path d'une cle KEK doit etre `string`, jamais `int`. Les providers cloud ne rentrent pas dans un int :
