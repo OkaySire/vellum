@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>Vellum.EntityFrameworkCore.Tests</RootNamespace>
+    <AssemblyName>Vellum.EntityFrameworkCore.Tests</AssemblyName>
+    <!--
+      CA1707: underscores in test method names are idiomatic xUnit (Given_When_Then).
+      CA2007: test methods do not need ConfigureAwait — xUnit has no sync context.
+      CA1515: test helpers are public so they can be shared across files.
+      CA1822: instance vs static is not meaningful on test helpers.
+      CA5394: tests deliberately use non-cryptographic randomness where it does not matter.
+    -->
+    <!--
+      EF1001: Vellum's EncryptionKeyRecord lives in a .Internal namespace and EF Core's
+      analyzer conventionally flags any reference to types under .Internal namespaces as
+      "consuming EF Core infrastructure". That is a false positive for our own package —
+      tests consume these internals via InternalsVisibleTo.
+    -->
+    <NoWarn>$(NoWarn);CA1707;CA2007;CA1515;CA1822;CA5394;EF1001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Vellum.EntityFrameworkCore\Vellum.EntityFrameworkCore.csproj" />
+  </ItemGroup>
+
+</Project>

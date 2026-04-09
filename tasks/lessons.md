@@ -304,6 +304,50 @@ toute la machinerie de Hosting. Plus rapide à compiler, plus facile à comprend
 
 ---
 
+### L21 — SQLite `:memory:` partage via `SqliteConnection` unique : impossible en concurrent DbContext
+
+**Contexte** : En Phase 1.7 (Vellum.EntityFrameworkCore), le test critique `ConcurrentCreateAsync_SameScope_OnlyOneWinner_ViaUniqueIndex` lance 8 stores en parallele pour prouver que le filtered unique index + DbUpdateException catch + re-read winner tient sous la course. Premiere tentative : une seule `SqliteConnection` en `:memory:` partagee entre tous les contextes. Echec : `SqliteException Error 5 "unable to delete/modify user-function due to active statements"`. EF Core's `SqliteRelationalConnection` appelle `CreateFunction` pour enregistrer ses fonctions custom a chaque initialisation de context ; quand plusieurs contextes se bootstrap en parallele sur la meme connexion, le 2e `CreateFunction` se heurte aux statements actifs du 1er.
+
+Deuxieme tentative : `Data Source=file:vellum-test-{Guid}?mode=memory&cache=shared` avec connection-per-context. Echec : `SqliteException Error 1 "no such table"`. Le mode `cache=shared` de Microsoft.Data.Sqlite a des quirks avec le connection pool et ne route pas systematiquement deux connexions distinctes vers la meme db in-memory.
+
+Troisieme tentative (celle qui marche) : fichier temporaire sur disque, `Data Source={tempPath};Pooling=False`, chaque `TestDbContext` ouvre sa propre connexion au meme fichier. SQLite gere nativement N connexions sur un fichier, les schemas sont stables, le temp file est efface en `DisposeAsync` apres `SqliteConnection.ClearAllPools()`.
+
+**Regle** : Pour tester de la vraie concurrence EF Core sur SQLite, utiliser un fichier temporaire partage entre contextes, pas `:memory:`. `:memory:` marche tres bien pour un seul context mais pas pour du concurrent multi-context. Le cout disk I/O d'un temp SQLite est negligeable pour un test unitaire.
+
+**Application** : `tests/Vellum.EntityFrameworkCore.Tests/Fixtures/TestHarness.cs` — le harness cree un `Path.GetTempPath()/vellum-test-{Guid}.sqlite`, le partage entre tous les contextes, et le supprime en dispose. `Pooling=False` + `SqliteConnection.ClearAllPools()` garantissent que le handle est relache avant le `File.Delete`.
+
+**Rationale** : SQLite est fundamentally une lib mono-connexion pour `:memory:` (la db "appartient" a la connexion). Les tests unitaires de concurrence ont besoin de multi-connexion, donc il faut un fichier. Le temp file se detruit automatiquement, c'est transparent, et ca reproduit fidelement le comportement concurrent de n'importe quel autre provider relationnel.
+
+---
+
+### L22 — `IModelCacheKeyFactory` unique-par-appel casse les concurrents EF Core
+
+**Contexte** : En Phase 1.7, pour permettre a differents tests d'utiliser des `VellumEntityFrameworkOptions` differentes sur le meme `TestDbContext` CLR type, premiere tentative : injecter un `IModelCacheKeyFactory` qui retourne un `Guid.NewGuid()` a chaque appel, forcant EF Core a rebuild le modele par context. Les tests sequentiels passent tous. Mais le test concurrent (8 contextes en parallele partageant le meme temp file) echoue avec `no such table`.
+
+Cause racine : quand chaque DbContext doit rebuild son model from scratch sous charge concurrente, EF Core semble perdre la synchronisation avec l'etat du schema physique. Le model rebuild n'est pas une operation pure — il touche le service provider interne et interagit avec le query compiler cache. Sous concurrence, au moins un des contextes voit un model/schema desynchronises et jette `no such table` alors que le fichier contient bien la table.
+
+**Regle** : Ne PAS utiliser un `IModelCacheKeyFactory` qui retourne une cle unique a chaque appel dans les tests qui exercent de la concurrence EF Core. Le model cache est la pour une raison. Si un test a besoin d'options differentes, **creer une autre classe `DbContext`** — EF Core cache le model par CLR type, donc deux types donnent deux models isoles sans casser le cache ni la concurrence.
+
+**Application** : `tests/Vellum.EntityFrameworkCore.Tests/Fixtures/FilterOverrideTestDbContext.cs` — classe dediee au test `VellumEntityFrameworkOptions_FilterOverride_AppliedToModel`, avec son propre slot statique `VellumOptions`. Le `TestDbContext` principal garde ses options constantes, ce qui permet au model cache de fonctionner normalement et au test concurrent de passer.
+
+**Rationale** : Le model cache est critique dans EF Core. Tout mecanisme qui le contourne (factory non-deterministe, reflection sur le ModelBuilder, etc.) expose des races que l'equipe EF Core n'a jamais eu a considerer parce que le model est concu pour etre construit une fois par type. La bonne granularite d'isolation pour des options EF differentes = une classe DbContext par configuration, pas un cache factory custom.
+
+---
+
+### L23 — EF Core `EF1001` analyzer se declenche sur nos propres `.Internal.*` namespaces
+
+**Contexte** : En Phase 1.7, l'internal entity `EncryptionKeyRecord` est place dans `Vellum.EntityFrameworkCore.Internal` (convention .NET pour "ne pas consommer depuis l'exterieur"). Le projet de source compile propre. Les tests, qui consomment ce type via `InternalsVisibleTo`, jettent `warning EF1001: Vellum.EntityFrameworkCore.Internal.EncryptionKeyRecord is an internal API that supports the Entity Framework Core infrastructure and not subject to the same compatibility standards as public APIs.`
+
+Cause : l'analyzer EF Core `InternalUsageDiagnosticAnalyzer` checke conventionnellement tout type dont le namespace contient `.Internal.` ou se termine par `.Internal`, pour proteger les consommateurs des internes EF Core eux-memes. La regle tire faussement sur les internals de notre propre package quand ils sont consommes depuis un autre assembly (comme un projet de test).
+
+**Regle** : Supprimer `EF1001` localement dans les projets qui consomment legitimement leurs propres types internes via `InternalsVisibleTo`. La suppression doit rester locale (csproj du projet concerne, pas `Directory.Build.props`) pour ne pas masquer des usages fautifs des vrais internes EF Core ailleurs dans la solution.
+
+**Application** : `tests/Vellum.EntityFrameworkCore.Tests/Vellum.EntityFrameworkCore.Tests.csproj` — `<NoWarn>$(NoWarn);...;EF1001</NoWarn>` avec commentaire expliquant pourquoi.
+
+**Rationale** : L'alternative serait de renommer le namespace pour eviter la convention (`.Persistence`, `.Storage`, ...). Mais `.Internal` porte un message semantique correct pour d'autres consommateurs (IDE, outils d'analyse, conventions .NET generales) et perdre ce signal pour contourner une regle d'analyzer est un mauvais trade.
+
+---
+
 ### L14 — ProviderVersion doit etre `string`, pas `int`, pour portabilite cloud
 
 **Regle** : Tout champ qui identifie une version/ARN/path d'une cle KEK doit etre `string`, jamais `int`. Les providers cloud ne rentrent pas dans un int :

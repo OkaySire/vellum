@@ -100,13 +100,22 @@ Plan d'implementation base sur `jacquouille-orchestrator/docs/vellum-library-pla
 - [x] Regression check: Phase 1.2 (5) + 1.3 (24) + 1.4 (30) + 1.5 (24) + 1.6 (30) = **113/113 tests** verts sur net10.0
 
 ### 1.7 Vellum.EntityFrameworkCore
-- [ ] Porter `BusEncryptionKeyRepository` depuis jacqcloud-buses
-- [ ] Refactor en `EfCoreEncryptionKeyStore<TContext>`
-- [ ] Entity `EncryptionKey` configurable (pas lie a un schema specifique)
-- [ ] `IgnoreQueryFilters()` preserve
-- [ ] Double-check + unique index pattern preserve (lecon v0.1.60-v0.1.63)
-- [ ] Migrations EF Core (PostgreSQL + SQL Server + SQLite)
-- [ ] Extension DI `AddEntityFrameworkCoreStore<TContext>()`
+- [x] `EntityFrameworkCoreEncryptionKeyStore<TContext>` portant les 4 couches de defense (double-check, add, catch DbUpdateException generique, detach, re-read winner)
+- [x] Internal `EncryptionKeyRecord` entity avec ToDomain / FromDomain — pas d'AutoMapper, mapping explicite trivial (`Vellum.EntityFrameworkCore.Internal` namespace, internal visibility, `InternalsVisibleTo Vellum.EntityFrameworkCore.Tests`)
+- [x] `VellumModelBuilderExtensions.AddVellumEncryptionKeys(modelBuilder, options)` — wire-up unique que le consumer appelle dans `OnModelCreating`
+- [x] `VellumEntityFrameworkOptions` — TableName / SchemaName / UniqueActiveIndexFilter / ScopeMaxLength avec default SQL Server `[IsActive] = 1` + XML docs listing PostgreSQL / SQLite / MySQL syntax
+- [x] L1 CRITIQUE : TOUTES les lectures chainent `.IgnoreQueryFilters()` avant `FirstOrDefaultAsync()` / `ToListAsync()` — pinned par le test `IgnoreQueryFilters_TenantFilterSet_StillReadsKeys` (TestDbContext applique un query filter match-nothing sur `EncryptionKeyRecord`)
+- [x] L2 : CreateAsync pattern = layer 1 double-check, layer 2 insert, layer 3 `Entry.State = Detached` sur `DbUpdateException`, layer 4 re-read winner via GetActiveAsync — match la semantique InMemory (return winner, never throw for race conflict)
+- [x] Provider-agnostic : catch `DbUpdateException` generique, jamais de `PostgresException 23505` ou `SqlException 2601` — EF Core normalise
+- [x] M1 : `GetByIdAsync` filter par `(KeyId == keyId && Scope == scope)` au niveau SQL — pas de scope check post-hoc
+- [x] `LoggerMessage` source gen pour les 4 events (key created, race detected, historical loaded, GetById miss) — `sealed partial class` generic over `TContext`
+- [x] `ConfigureAwait(false)` sur tous les `await` (library code)
+- [x] Extension DI `AddEntityFrameworkCoreStore<TContext>(Action<VellumEntityFrameworkOptions>?)` — SCOPED lifetime (DbContext est scoped, store doit suivre), TryAdd semantics, AddOptions<VellumEntityFrameworkOptions>().Configure(configure ?? (_ => { }))
+- [x] `tests/Vellum.EntityFrameworkCore.Tests` — 22 tests verts sur net10.0 (Store 17 incluant `ConcurrentCreateAsync_SameScope_OnlyOneWinner_ViaUniqueIndex` + ServiceCollection 5) via SQLite file-backed temp DB (voir L21 pour le pourquoi du file vs `:memory:`)
+- [x] `dotnet pack` produit `Vellum.EntityFrameworkCore.0.1.0-preview.1.nupkg` (54K) + snupkg (36K) — Source Link actif
+- [x] Build clean multi-target net8.0;net9.0;net10.0, 0 warning, 0 error, TreatWarningsAsErrors=true
+- [x] Regression check: Phase 1.2 (5) + 1.3 (24) + 1.4 (30) + 1.5 (24) + 1.6 (30) + 1.7 (22) = **135/135 tests** verts sur net10.0
+- [ ] (hors scope Phase 1.7) Migrations EF Core packagees — decision: le consumer cree ses propres migrations apres avoir appele `AddVellumEncryptionKeys` dans son `OnModelCreating`, README exemple a ajouter Phase 5
 
 ### 1.8 Tests
 - [ ] `Vellum.Abstractions.Tests` (value objects, records)
