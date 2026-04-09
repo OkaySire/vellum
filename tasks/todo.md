@@ -23,17 +23,21 @@ Plan d'implementation base sur `jacquouille-orchestrator/docs/vellum-library-pla
 
 ### 1.2 Vellum.Abstractions
 - [x] Interface `IKeyEncryptionProvider`
-- [x] Interface `IEncryptionKeyStore`
-- [x] Interface `IDekManager`
-- [x] Interface `IPayloadEncryptor`
-- [x] Record `EncryptionKey`
-- [x] Record `ActiveDek`
-- [x] Record `EncryptedPayload`
-- [x] Record `WrappedKey`
-- [x] Record `PayloadEncryptionResult`
+- [x] Interface `IEncryptionKeyStore` (scope on GetByIdAsync — M1)
+- [x] Interface `IDekManager` (ValueTask on hot path — M7, scope on GetDekByKeyIdAsync — M1)
+- [x] Interface `IPayloadEncryptor` (symmetric signatures — C4, IsEnabled — M10)
+- [x] Interface `IRandomBytesProvider` (M3)
+- [x] Record `EncryptionKey` (uses WrappedKey field — M9)
+- [x] Record `Dek` (renamed from ActiveDek — M5)
+- [x] Record `EncryptedPayload` (self-contained with WrappedDek — C3, binary Nonce/Ciphertext with structural equality — C4/L13)
+- [x] Record `WrappedKey` (string ProviderVersion — N8/L14)
+- [x] Static `PayloadEncryptorExtensions` — string convenience (C4)
 - [x] XML docs sur tous les publics
 - [x] Package metadata (authors, description, tags, repo url)
+- [x] VersionPrefix=0.1.0 / VersionSuffix=preview.1 (C1)
+- [x] Microsoft.SourceLink.GitHub reference + git init + origin remote (C2)
 - [x] Build clean multi-target net8.0;net9.0;net10.0, zero warning avec TreatWarningsAsErrors=true
+- [x] `tests/Vellum.Abstractions.Tests` — 5 smoke tests passent sur net8/9/10 (M8)
 
 ### 1.3 Vellum.Core
 - [ ] Porter `DekManager` depuis jacqcloud-buses

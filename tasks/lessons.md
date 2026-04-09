@@ -132,3 +132,31 @@ public sealed partial class DekManager : IDekManager
 ### L12 — Sealed by default
 
 **Regle** : Chaque class est `sealed` sauf justification explicite. Vellum ne supporte pas l'heritage de ses implementations — les consumers doivent implementer les interfaces, pas heriter des classes.
+
+---
+
+### L13 — Records avec `byte[]` : equality manuelle obligatoire
+
+**Regle** : Un `record` qui contient un champ `byte[]` (ou `Memory<byte>`) ne peut PAS se reposer sur l'equality auto-generee du compilateur. Le compilateur compare les byte[] par reference (`ReferenceEquals`), ce qui donne des faux negatifs : deux instances avec le meme contenu ne sont pas egales.
+
+**Application** : Override `Equals(T?)` et `GetHashCode()` manuellement, en utilisant :
+- `field.AsSpan().SequenceEqual(other.field)` pour comparer les byte[]
+- `HashCode.AddBytes(field)` pour hasher les byte[] (net6+)
+
+**Exemple dans Vellum** : `EncryptedPayload` (cf. `src/Vellum.Abstractions/EncryptedPayload.cs`) a `byte[] Ciphertext` et `byte[] Nonce`. Sans override, le test `EncryptedPayload_ValueEquality_StructuralOverByteArrays` echoue parce que deux envelopes avec ciphertext identique mais instances byte[] differentes ne seraient pas egales.
+
+**Rationale** : Les envelopes, identifiants, hash, etc. sont des value objects par definition. Si on les serialise/deserialise depuis une DB, les byte[] sont des nouvelles instances. L'equality de reference cree des bugs silencieux dans les caches, les tests, les Equals-based collections.
+
+---
+
+### L14 — ProviderVersion doit etre `string`, pas `int`, pour portabilite cloud
+
+**Regle** : Tout champ qui identifie une version/ARN/path d'une cle KEK doit etre `string`, jamais `int`. Les providers cloud ne rentrent pas dans un int :
+- HashiCorp Vault Transit : `"1"`, `"2"`, ... (ok pour int, mais on paye le cast)
+- AWS KMS : ARN complet (`arn:aws:kms:us-east-1:111122223333:key/abc-def-123`)
+- Azure Key Vault : URL avec GUID (`https://kv.vault.azure.net/keys/my-key/0123456789abcdef0123456789abcdef`)
+- GCP KMS : resource path (`projects/proj/locations/us/keyRings/ring/cryptoKeys/key/cryptoKeyVersions/1`)
+
+**Application** : `WrappedKey.ProviderVersion` et toute propriete equivalente sont `string ProviderVersion`. Le champ est opaque : Vellum le round-trip verbatim au provider sans jamais le parser.
+
+**Rationale** : Un `int` verrouille Vellum a Vault. Un `string` ouvre la porte a tous les providers cloud sans breaking change. Decouvrir ca apres coup = breaking change public + migration guide. Decouvrir ca en Phase 1.2 = 1 commit trivial.

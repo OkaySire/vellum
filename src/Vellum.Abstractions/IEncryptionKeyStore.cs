@@ -30,14 +30,23 @@ public interface IEncryptionKeyStore
     public Task<EncryptionKey?> GetActiveAsync(string scope, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Returns a specific key by its identifier, regardless of whether it is active.
+    /// Returns a specific key by its identifier and scope, regardless of whether it is active.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Used when decrypting historical payloads that reference a specific <see cref="EncryptionKey.KeyId"/>.
+    /// </para>
+    /// <para>
+    /// <b>Multi-tenant defense.</b> Implementations <b>must</b> verify that the resolved key's
+    /// <see cref="EncryptionKey.Scope"/> matches <paramref name="scope"/> and return
+    /// <see langword="null"/> (or throw) on mismatch. Without this check, a tenant could
+    /// access another tenant's wrapped DEK by guessing a <see cref="System.Guid"/>.
+    /// </para>
     /// </remarks>
     /// <param name="keyId">The key identifier.</param>
+    /// <param name="scope">Opaque scope identifier that must match the persisted key's scope.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    public Task<EncryptionKey?> GetByIdAsync(Guid keyId, CancellationToken cancellationToken = default);
+    public Task<EncryptionKey?> GetByIdAsync(Guid keyId, string scope, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Persists a new key.

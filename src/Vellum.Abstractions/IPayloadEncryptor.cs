@@ -1,7 +1,7 @@
 namespace Vellum;
 
 /// <summary>
-/// Encrypts and decrypts string payloads using envelope encryption backed by <see cref="IDekManager"/>.
+/// Encrypts and decrypts binary payloads using envelope encryption backed by <see cref="IDekManager"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -12,8 +12,20 @@ namespace Vellum;
 ///   <item><description>Resolves the active DEK for the given scope via <see cref="IDekManager"/>.</description></item>
 ///   <item><description>Generates a fresh 12-byte AES-GCM nonce.</description></item>
 ///   <item><description>Encrypts the plaintext with AES-256-GCM.</description></item>
-///   <item><description>Returns a <see cref="PayloadEncryptionResult"/> containing the ciphertext, nonce, and key identifier for later decryption.</description></item>
+///   <item><description>Returns a self-contained <see cref="EncryptedPayload"/> bundling the ciphertext, nonce, wrapped DEK, and audit identifier.</description></item>
 /// </list>
+/// <para>
+/// <b>Symmetry.</b> The encrypt and decrypt signatures are symmetric: <see cref="EncryptAsync"/>
+/// returns an <see cref="EncryptedPayload"/>, and <see cref="DecryptAsync"/> takes the same
+/// <see cref="EncryptedPayload"/> unchanged. There is no intermediate DTO or hand-rolled
+/// base64 conversion.
+/// </para>
+/// <para>
+/// <b>Binary-first.</b> The primary API operates on <see cref="ReadOnlyMemory{T}"/> and
+/// <see cref="byte"/> arrays to avoid forcing a base64 round-trip on binary payloads (files,
+/// protobuf, BSON, etc.). Use the string convenience extensions in
+/// <see cref="PayloadEncryptorExtensions"/> when your plaintext is UTF-8 text.
+/// </para>
 /// <para>
 /// <b>Fail closed.</b> Any error must throw. Implementations never return the plaintext unencrypted.
 /// </para>
@@ -21,23 +33,43 @@ namespace Vellum;
 public interface IPayloadEncryptor
 {
     /// <summary>
-    /// Encrypts the given plaintext string using the active DEK for the specified scope.
+    /// Indicates whether this encryptor is configured and ready to encrypt or decrypt.
     /// </summary>
-    /// <param name="plaintext">Plaintext to encrypt. Encoded as UTF-8 before encryption.</param>
+    /// <remarks>
+    /// <para>
+    /// Consumers can inspect <see cref="IsEnabled"/> to implement feature-flagged encryption
+    /// during a rollout: if encryption is not yet configured for a given deployment, they can
+    /// skip the call rather than let it throw. When <see langword="false"/>, callers must
+    /// <b>not</b> invoke <see cref="EncryptAsync"/> or <see cref="DecryptAsync"/> — both will
+    /// throw.
+    /// </para>
+    /// <para>
+    /// A default Core implementation will return <see langword="true"/> when both a
+    /// <see cref="IKeyEncryptionProvider"/> and an <see cref="IEncryptionKeyStore"/> are
+    /// registered in the DI container.
+    /// </para>
+    /// </remarks>
+    public bool IsEnabled { get; }
+
+    /// <summary>
+    /// Encrypts the given plaintext bytes using the active DEK for the specified scope.
+    /// </summary>
+    /// <param name="plaintext">Plaintext bytes to encrypt. Any binary content is supported.</param>
     /// <param name="scope">Opaque scope identifier used to resolve the active DEK.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A <see cref="PayloadEncryptionResult"/> containing the ciphertext, nonce, and key identifier.</returns>
-    public Task<PayloadEncryptionResult> EncryptAsync(string plaintext, string scope, CancellationToken cancellationToken = default);
+    /// <returns>A self-contained <see cref="EncryptedPayload"/> bundling the ciphertext, nonce, wrapped DEK, and audit identifier.</returns>
+    /// <exception cref="System.InvalidOperationException">Thrown when <see cref="IsEnabled"/> is <see langword="false"/> or the DEK cannot be resolved.</exception>
+    /// <exception cref="System.OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is cancelled.</exception>
+    public Task<EncryptedPayload> EncryptAsync(ReadOnlyMemory<byte> plaintext, string scope, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Decrypts a previously-encrypted payload.
     /// </summary>
-    /// <param name="ciphertextBase64">Base64-encoded ciphertext (with appended AES-GCM authentication tag).</param>
-    /// <param name="nonce">The 12-byte AES-GCM nonce used at encryption time.</param>
-    /// <param name="keyId">Identifier of the DEK used at encryption time.</param>
+    /// <param name="payload">The self-contained envelope produced by a prior call to <see cref="EncryptAsync(System.ReadOnlyMemory{byte}, string, System.Threading.CancellationToken)"/>.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The original UTF-8 plaintext string.</returns>
+    /// <returns>The original plaintext bytes. Callers own this array and should zero it out if it contains sensitive data.</returns>
     /// <exception cref="System.Security.Cryptography.CryptographicException">Thrown when the ciphertext is corrupted, tampered with, or does not match the authentication tag.</exception>
-    /// <exception cref="System.InvalidOperationException">Thrown when the <paramref name="keyId"/> cannot be resolved.</exception>
-    public Task<string> DecryptAsync(string ciphertextBase64, byte[] nonce, Guid keyId, CancellationToken cancellationToken = default);
+    /// <exception cref="System.InvalidOperationException">Thrown when <see cref="IsEnabled"/> is <see langword="false"/> or the wrapped DEK cannot be unwrapped.</exception>
+    /// <exception cref="System.OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is cancelled.</exception>
+    public Task<byte[]> DecryptAsync(EncryptedPayload payload, CancellationToken cancellationToken = default);
 }

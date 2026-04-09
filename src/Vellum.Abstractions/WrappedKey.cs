@@ -17,7 +17,14 @@ namespace Vellum;
 /// Consumers should not attempt to parse <see cref="Ciphertext"/>; only the originating provider
 /// knows how to interpret it.
 /// </para>
+/// <para>
+/// <see cref="ProviderVersion"/> is an opaque provider-specific string. Cloud providers use
+/// heterogeneous formats: HashiCorp Vault returns integers such as <c>"1"</c>, AWS KMS returns
+/// ARNs, Azure Key Vault returns key URIs containing a GUID, and GCP KMS returns full resource
+/// paths. Vellum never interprets this field — it is round-tripped verbatim to
+/// <see cref="IKeyEncryptionProvider.UnwrapAsync(WrappedKey, System.Threading.CancellationToken)"/>.
+/// </para>
 /// </remarks>
 /// <param name="Ciphertext">Provider-specific wrapped-DEK ciphertext. Opaque to Vellum core.</param>
-/// <param name="ProviderVersion">The version of the KEK used to wrap. Providers that rotate KEKs use this to locate the correct unwrap key.</param>
-public sealed record WrappedKey(string Ciphertext, int ProviderVersion);
+/// <param name="ProviderVersion">Opaque provider-specific version/identifier of the KEK used to wrap. Round-tripped verbatim on unwrap.</param>
+public sealed record WrappedKey(string Ciphertext, string ProviderVersion);
