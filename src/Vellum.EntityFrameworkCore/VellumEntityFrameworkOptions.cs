@@ -61,4 +61,20 @@ public sealed class VellumEntityFrameworkOptions
     /// and short enough to index efficiently on every major provider.
     /// </summary>
     public int ScopeMaxLength { get; set; } = 256;
+
+    /// <summary>
+    /// Gets or sets the maximum length of the <see cref="WrappedKey.ProviderVersion"/>
+    /// column. Defaults to 512 characters, which comfortably holds AWS KMS key ARNs,
+    /// Azure Key Vault key identifiers, and GCP KMS resource paths.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Raise this only if you use a KEK provider whose version identifier is longer than
+    /// 512 characters (unusual but not impossible for deeply-nested GCP KMS resource paths).
+    /// Lower it only if you have a strict column-length budget and know your provider emits
+    /// short identifiers — shortening the column on an existing table requires a manual
+    /// data migration.
+    /// </para>
+    /// </remarks>
+    public int WrappedProviderVersionMaxLength { get; set; } = 512;
 }

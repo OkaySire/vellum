@@ -62,7 +62,7 @@ public static class VellumModelBuilderExtensions
 
         entity.Property(k => k.WrappedProviderVersion)
             .IsRequired()
-            .HasMaxLength(512);
+            .HasMaxLength(options.WrappedProviderVersionMaxLength);
 
         entity.Property(k => k.CreatedAt)
             .IsRequired();

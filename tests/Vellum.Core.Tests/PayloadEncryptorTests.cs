@@ -213,6 +213,48 @@ public sealed class PayloadEncryptorTests
             .WithMessage("*expected 32 bytes*");
     }
 
+    [Fact]
+    public async Task EncryptAsync_ConcurrentCalls_AllNoncesAreDistinct()
+    {
+        // L-5: nonce reuse in AES-GCM is the #1 catastrophic failure mode of the algorithm —
+        // two messages with the same (key, nonce) pair leak the XOR of their plaintexts AND
+        // allow forging arbitrary ciphertexts. The sequential test EncryptTwice_*_ProducesDifferentCiphertexts
+        // proves the nonce generator works for back-to-back calls, but we also want a
+        // high-concurrency stress test to catch any future refactor that introduces an
+        // internal buffer reuse, a shared counter, or a race in the RNG path.
+
+        (PayloadEncryptor encryptor, _, _) = BuildSut();
+
+        // Warm the DEK cache so every task exercises the hot path and shares the same key
+        // — this is the scenario we care about (maximum chance of nonce collision, since the
+        // key is constant).
+        byte[] plaintext = Encoding.UTF8.GetBytes("concurrent nonce stress test payload");
+        _ = await encryptor.EncryptAsync(plaintext, Scope);
+
+        const int iterations = 1000;
+        Task<EncryptedPayload>[] tasks = new Task<EncryptedPayload>[iterations];
+        for (int i = 0; i < iterations; i++)
+        {
+            tasks[i] = Task.Run(() => encryptor.EncryptAsync(plaintext, Scope));
+        }
+
+        EncryptedPayload[] envelopes = await Task.WhenAll(tasks);
+
+        HashSet<string> uniqueNonces = envelopes
+            .Select(e => Convert.ToBase64String(e.Nonce))
+            .ToHashSet(StringComparer.Ordinal);
+
+        uniqueNonces.Count.Should().Be(iterations,
+            "nonce reuse in AES-GCM is catastrophic — every concurrent call must produce a fresh nonce");
+
+        HashSet<string> uniqueCiphertexts = envelopes
+            .Select(e => Convert.ToBase64String(e.Ciphertext))
+            .ToHashSet(StringComparer.Ordinal);
+
+        uniqueCiphertexts.Count.Should().Be(iterations,
+            "distinct nonces over the same plaintext must yield distinct ciphertexts");
+    }
+
     /// <summary>
     /// Minimal KEK provider whose <see cref="UnwrapAsync"/> returns a buffer of the
     /// configured length, regardless of what was wrapped. Used to prove that Vellum

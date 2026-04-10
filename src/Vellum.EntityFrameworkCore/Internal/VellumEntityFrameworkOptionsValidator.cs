@@ -34,6 +34,12 @@ internal sealed class VellumEntityFrameworkOptionsValidator : IValidateOptions<V
                 $"{nameof(VellumEntityFrameworkOptions.ScopeMaxLength)} must be strictly positive; got {options.ScopeMaxLength}.");
         }
 
+        if (options.WrappedProviderVersionMaxLength <= 0)
+        {
+            failures.Add(
+                $"{nameof(VellumEntityFrameworkOptions.WrappedProviderVersionMaxLength)} must be strictly positive; got {options.WrappedProviderVersionMaxLength}.");
+        }
+
         if (string.IsNullOrWhiteSpace(options.UniqueActiveIndexFilter))
         {
             failures.Add(

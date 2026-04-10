@@ -114,6 +114,39 @@ public sealed class VaultServiceCollectionExtensionsTests
     }
 
     [Fact]
+    public void AddVaultProvider_InvalidAddressWithUserInfo_DoesNotLeakCredentials()
+    {
+        // L-2: if a malformed Address contains a `user:pass@` userinfo prefix, the
+        // validation error must NOT echo the credential. The scrub strips the userinfo
+        // before embedding the Address in the failure message.
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddVaultProvider(opts =>
+        {
+            // Invalid scheme so we hit the echoing branch of the validator.
+            opts.Address = "ftp://alice:supersecret@vault.example:8200";
+            opts.Token = "hvs.abc";
+            opts.KeyName = "my-kek";
+        });
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+        IOptions<VaultOptions> options = sp.GetRequiredService<IOptions<VaultOptions>>();
+
+        Action act = () => _ = options.Value;
+
+        OptionsValidationException ex = act.Should().Throw<OptionsValidationException>().Which;
+        foreach (string failure in ex.Failures)
+        {
+            failure.Should().NotContain("alice",
+                "userinfo username must never appear in a validation failure message");
+            failure.Should().NotContain("supersecret",
+                "userinfo password must never appear in a validation failure message");
+            failure.Should().NotContain("alice:supersecret",
+                "the raw userinfo block must be scrubbed out before echoing");
+        }
+    }
+
+    [Fact]
     public void AddVaultProvider_InvalidAddressScheme_ThrowsOnValidation()
     {
         ServiceCollection services = new();

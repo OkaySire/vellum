@@ -239,6 +239,61 @@ public sealed class DekManagerTests
     }
 
     [Fact]
+    public async Task RotateDekAsync_DoesNotEvictByIdCache_ForHistoricalDecryption()
+    {
+        // L-4: after rotation, decrypting an envelope that references the OLD key must still
+        // hit the by-id cache. Rotate evicts the active-scope cache entry to force a reload,
+        // but the scope-partitioned by-id cache entries must remain so a burst of historical
+        // decrypts doesn't thrash the KEK provider.
+        DekManager sut = BuildSut(
+            out FakeKeyEncryptionProvider provider,
+            out _,
+            out _,
+            out _,
+            dekCacheTtl: TimeSpan.FromMinutes(30));
+
+        // 1. Create a key and prime the by-id cache via GetDekByKeyIdAsync.
+        Dek original = await sut.GetActiveDekAsync(Scope);
+        _ = await sut.GetDekByKeyIdAsync(original.KeyId, Scope);
+        int unwrapsBeforeRotate = provider.UnwrapCalls;
+
+        // 2. Rotate.
+        await sut.RotateDekAsync(Scope);
+
+        // 3. Decrypt-by-id against the original key — must not trigger a new Unwrap.
+        Dek historical = await sut.GetDekByKeyIdAsync(original.KeyId, Scope);
+
+        historical.KeyId.Should().Be(original.KeyId);
+        provider.UnwrapCalls.Should().Be(unwrapsBeforeRotate,
+            "the by-id cache must survive rotation so historical decryption is cache-hot");
+    }
+
+    [Fact]
+    public async Task GetDekByKeyIdAsync_CacheKeyIdMismatch_FailsClosed()
+    {
+        // L-3: belt-and-braces. The cache key is scope+keyId, so a mismatch is unreachable
+        // through the normal API — but we want to prove the invariant holds if someone
+        // manually pokes a bad entry into the cache. Poison the cache with a DEK whose
+        // KeyId differs from the lookup key; the fast path must throw.
+        DekManager sut = BuildSut(out _, out _, out _, out IMemoryCache cache);
+
+        Guid requestedKeyId = Guid.NewGuid();
+        Dek poisoned = new(
+            Key: new byte[32],
+            KeyId: Guid.NewGuid(), // intentionally different
+            WrappedKey: new WrappedKey("fake:v1:xxx", "v1"));
+
+        // Reach into the cache-key builder via the exact format the manager uses.
+        string cacheKey = $"vellum:dek:id:{Scope}:{requestedKeyId}";
+        cache.Set(cacheKey, poisoned);
+
+        Func<Task> act = async () => await sut.GetDekByKeyIdAsync(requestedKeyId, Scope);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*does not match the requested KeyId*");
+    }
+
+    [Fact]
     public async Task GetActiveDekAsync_ProviderReturnsShortDek_ThrowsAndFailsClosed()
     {
         // H-1: the load path (LoadAndCacheAsync) must reject any unwrapped DEK whose length

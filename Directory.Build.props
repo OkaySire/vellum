@@ -18,6 +18,13 @@
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <!--
+      L-9: commit packages.lock.json per project so transitive dependency versions are
+      pinned and auditable. On CI, set RestoreLockedMode=true to fail the restore if the
+      lockfile ever drifts from the .csproj manifests.
+    -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(GITHUB_ACTIONS)' == 'true'">true</RestoreLockedMode>
   </PropertyGroup>
 
   <PropertyGroup Label="Package metadata">

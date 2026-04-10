@@ -123,7 +123,7 @@ public sealed partial class DekManager(
         {
             // We won the race.
             active = new Dek(newDekBytes, persisted.KeyId, persisted.WrappedKey);
-            LogDekCreated(_logger, scope, persisted.WrappedKey.ProviderVersion);
+            LogDekCreated(_logger, scope, persisted.KeyId, persisted.WrappedKey.ProviderVersion);
         }
         else
         {
@@ -159,6 +159,17 @@ public sealed partial class DekManager(
         string cacheKey = BuildKeyIdCacheKey(keyId, scope);
         if (_cache.TryGetValue(cacheKey, out Dek? cached) && cached is not null)
         {
+            // L-3: belt-and-braces re-verification on the fast path. The cache key is already
+            // scope-partitioned (see L15) AND includes the keyId, so a mismatch here should
+            // be impossible — but if some future refactor ever broke the key-building invariant,
+            // we prefer to fail-closed instead of returning a cached DEK for a different KeyId.
+            if (cached.KeyId != keyId)
+            {
+                LogDekCacheKeyIdMismatch(_logger, keyId, scope, cached.KeyId);
+                throw new InvalidOperationException(
+                    $"Cached DEK KeyId ({cached.KeyId}) does not match the requested KeyId ({keyId}) for scope '{scope}'. This is a Vellum bug — please file an issue with the log output.");
+            }
+
             return new ValueTask<Dek>(CloneDek(cached));
         }
 
@@ -283,8 +294,11 @@ public sealed partial class DekManager(
     [LoggerMessage(Level = LogLevel.Debug, Message = "DEK loaded from store for scope {Scope}")]
     private static partial void LogDekLoadedFromStore(ILogger logger, string scope);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "DEK created for scope {Scope} (KEK provider version {ProviderVersion})")]
-    private static partial void LogDekCreated(ILogger logger, string scope, string providerVersion);
+    // L-6: KeyId is included so that audit trails can correlate the creation log entry with
+    // the envelope metadata, which also carries the KeyId. The KEK provider version stays in
+    // so rotation events remain visible.
+    [LoggerMessage(Level = LogLevel.Information, Message = "DEK created for scope {Scope} with KeyId {KeyId} (KEK provider version {ProviderVersion})")]
+    private static partial void LogDekCreated(ILogger logger, string scope, Guid keyId, string providerVersion);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "DEK rotated for scope {Scope}")]
     private static partial void LogDekRotated(ILogger logger, string scope);
@@ -307,4 +321,13 @@ public sealed partial class DekManager(
         Level = LogLevel.Warning,
         Message = "DEK scope mismatch: key {KeyId} was requested for scope {RequestedScope} but belongs to scope {ActualScope}")]
     private static partial void LogDekScopeMismatch(ILogger logger, Guid keyId, string requestedScope, string actualScope);
+
+    // L-3: EventId 1003 is distinct from not-found (1001) and scope-mismatch (1002) so that
+    // a SIEM rule can alert specifically on a Vellum cache invariant violation — something
+    // that should never happen in production.
+    [LoggerMessage(
+        EventId = 1003,
+        Level = LogLevel.Critical,
+        Message = "DEK cache invariant violation: request for key {RequestedKeyId} on scope {Scope} resolved to cached entry with key {CachedKeyId}")]
+    private static partial void LogDekCacheKeyIdMismatch(ILogger logger, Guid requestedKeyId, string scope, Guid cachedKeyId);
 }

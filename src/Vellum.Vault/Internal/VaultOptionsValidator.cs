@@ -22,7 +22,12 @@ internal sealed class VaultOptionsValidator : IValidateOptions<VaultOptions>
         else if (!Uri.TryCreate(options.Address, UriKind.Absolute, out Uri? parsed) ||
                  (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
         {
-            failures.Add($"{nameof(VaultOptions.Address)} ('{options.Address}') must be an absolute http:// or https:// URI.");
+            // L-2: scrub any `user:pass@` userinfo before echoing the malformed Address in
+            // the failure message. If the URI is parseable enough to have a host, prefer the
+            // host form so we never leak credentials. If it is not parseable at all, cut off
+            // anything before the first `@` as a best-effort defence.
+            string safeEcho = ScrubUserInfo(options.Address);
+            failures.Add($"{nameof(VaultOptions.Address)} ('{safeEcho}') must be an absolute http:// or https:// URI.");
         }
 
         if (string.IsNullOrWhiteSpace(options.Token))
@@ -44,5 +49,31 @@ internal sealed class VaultOptionsValidator : IValidateOptions<VaultOptions>
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);
+    }
+
+    /// <summary>
+    /// Removes any <c>user:pass@</c> userinfo prefix from the host portion of the given
+    /// address so that an accidentally-configured credential never reaches a log.
+    /// </summary>
+    private static string ScrubUserInfo(string address)
+    {
+        // If Uri.TryCreate fails to parse even the host at all, fall back to string surgery:
+        // cut off everything up to and including the first `@` in the scheme-less portion.
+        int schemeDelimiter = address.IndexOf("://", StringComparison.Ordinal);
+        if (schemeDelimiter < 0)
+        {
+            int at = address.IndexOf('@', StringComparison.Ordinal);
+            return at < 0 ? address : address[(at + 1)..];
+        }
+
+        string scheme = address[..schemeDelimiter];
+        string remainder = address[(schemeDelimiter + 3)..];
+        int atInRemainder = remainder.IndexOf('@', StringComparison.Ordinal);
+        if (atInRemainder < 0)
+        {
+            return address;
+        }
+
+        return $"{scheme}://{remainder[(atInRemainder + 1)..]}";
     }
 }
