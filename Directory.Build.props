@@ -35,8 +35,8 @@
     <Product>Vellum</Product>
     <Copyright>Copyright (c) Vellum Contributors</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/vellum-dotnet/vellum</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/vellum-dotnet/vellum</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/OkaySire/vellum</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/OkaySire/vellum</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>encryption;envelope-encryption;dek;kek;aes-gcm;cryptography;security;vault;kms</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
