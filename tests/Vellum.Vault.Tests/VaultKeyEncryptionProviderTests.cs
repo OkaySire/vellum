@@ -47,6 +47,22 @@ public sealed class VaultKeyEncryptionProviderTests
     private static HttpResponseMessage JsonOk<T>(T payload) =>
         Ok(JsonSerializer.Serialize(payload));
 
+    private static HttpResponseMessage Error(
+        HttpStatusCode status,
+        string body,
+        string contentType = "application/json") =>
+        new(status)
+        {
+            Content = new StringContent(body, Encoding.UTF8, contentType),
+        };
+
+    private static HttpResponseMessage Status(HttpStatusCode status) => new(status);
+
+    // Pre-serialized JSON bodies for null-field scenarios, avoiding anonymous types with
+    // (string?)null upcasts that CodeQL flags as cs/useless-upcast.
+    private const string _nullCiphertextJson = "{\"data\":{\"ciphertext\":null}}";
+    private const string _nullPlaintextJson = "{\"data\":{\"plaintext\":null}}";
+
     // ---------------------------------------------------------------------
     // Wrap
     // ---------------------------------------------------------------------
@@ -119,10 +135,7 @@ public sealed class VaultKeyEncryptionProviderTests
     public async Task WrapAsync_Non200_ThrowsInvalidOperationException()
     {
         FakeHttpMessageHandler handler = new((request, ct) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden)
-            {
-                Content = new StringContent("{\"errors\":[\"permission denied\"]}", Encoding.UTF8, "application/json"),
-            }));
+            Task.FromResult(Error(HttpStatusCode.Forbidden, "{\"errors\":[\"permission denied\"]}")));
 
         VaultKeyEncryptionProvider provider = CreateProvider(handler);
 
@@ -164,7 +177,7 @@ public sealed class VaultKeyEncryptionProviderTests
     public async Task WrapAsync_NullCiphertext_ThrowsInvalidOperationException()
     {
         FakeHttpMessageHandler handler = new((request, ct) =>
-            Task.FromResult(JsonOk(new { data = new { ciphertext = (string?)null } })));
+            Task.FromResult(Ok(_nullCiphertextJson)));
 
         VaultKeyEncryptionProvider provider = CreateProvider(handler);
 
@@ -267,13 +280,9 @@ public sealed class VaultKeyEncryptionProviderTests
     public async Task UnwrapAsync_Non200_ThrowsAndBodyIsPropagatedInException()
     {
         FakeHttpMessageHandler handler = new((request, ct) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
-            {
-                Content = new StringContent(
-                    "{\"errors\":[\"invalid ciphertext: failed to base64-decode ciphertext\"]}",
-                    Encoding.UTF8,
-                    "application/json"),
-            }));
+            Task.FromResult(Error(
+                HttpStatusCode.BadRequest,
+                "{\"errors\":[\"invalid ciphertext: failed to base64-decode ciphertext\"]}")));
 
         VaultKeyEncryptionProvider provider = CreateProvider(handler);
 
@@ -289,7 +298,7 @@ public sealed class VaultKeyEncryptionProviderTests
     public async Task UnwrapAsync_NullPlaintext_ThrowsInvalidOperationException()
     {
         FakeHttpMessageHandler handler = new((request, ct) =>
-            Task.FromResult(JsonOk(new { data = new { plaintext = (string?)null } })));
+            Task.FromResult(Ok(_nullPlaintextJson)));
 
         VaultKeyEncryptionProvider provider = CreateProvider(handler);
 
@@ -370,13 +379,7 @@ public sealed class VaultKeyEncryptionProviderTests
             using JsonDocument doc = JsonDocument.Parse(body);
             string plaintext = doc.RootElement.GetProperty("plaintext").GetString()!;
             string ciphertext = "vault:v1:" + plaintext;
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(
-                    JsonSerializer.Serialize(new { data = new { ciphertext } }),
-                    Encoding.UTF8,
-                    "application/json"),
-            });
+            return Task.FromResult(JsonOk(new { data = new { ciphertext } }));
         }
 
         if (path.Contains("/decrypt/", StringComparison.Ordinal))
@@ -388,16 +391,10 @@ public sealed class VaultKeyEncryptionProviderTests
             string plaintext = ciphertext.StartsWith(prefix, StringComparison.Ordinal)
                 ? ciphertext[prefix.Length..]
                 : throw new InvalidOperationException("unexpected ciphertext in fake vault");
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(
-                    JsonSerializer.Serialize(new { data = new { plaintext } }),
-                    Encoding.UTF8,
-                    "application/json"),
-            });
+            return Task.FromResult(JsonOk(new { data = new { plaintext } }));
         }
 
-        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        return Task.FromResult(Status(HttpStatusCode.NotFound));
     }
 
     // ---------------------------------------------------------------------
@@ -412,10 +409,7 @@ public sealed class VaultKeyEncryptionProviderTests
         // useful without turning the exception into a vector for attacker-controlled content.
         string oversizedBody = new string('A', 100_000);
         FakeHttpMessageHandler handler = new((request, ct) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError)
-            {
-                Content = new StringContent(oversizedBody, Encoding.UTF8, "text/html"),
-            }));
+            Task.FromResult(Error(HttpStatusCode.InternalServerError, oversizedBody, "text/html")));
 
         VaultKeyEncryptionProvider provider = CreateProvider(handler);
 
@@ -436,10 +430,7 @@ public sealed class VaultKeyEncryptionProviderTests
         // H-2 symmetry on the decrypt path.
         string oversizedBody = new string('B', 50_000);
         FakeHttpMessageHandler handler = new((request, ct) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadGateway)
-            {
-                Content = new StringContent(oversizedBody, Encoding.UTF8, "text/plain"),
-            }));
+            Task.FromResult(Error(HttpStatusCode.BadGateway, oversizedBody, "text/plain")));
 
         VaultKeyEncryptionProvider provider = CreateProvider(handler);
 
@@ -496,6 +487,11 @@ public sealed class VaultKeyEncryptionProviderTests
                 await action(provider).ConfigureAwait(false);
             }
 #pragma warning disable CA1031 // test intentionally catches every exception so it can scan each one for the token
+            // Intentional broad catch: security invariant pinner — every exception path from
+            // seven distinct scenarios (HTTP errors, JsonException, InvalidOperationException,
+            // FormatException...) must be examined for token leakage. Narrowing would miss
+            // regressions. See tasks/lessons.md L-7 rationale.
+            // lgtm[cs/catch-of-all-exceptions]
             catch (Exception ex)
 #pragma warning restore CA1031
             {
@@ -518,7 +514,7 @@ public sealed class VaultKeyEncryptionProviderTests
 
         // 3) Missing ciphertext on encrypt: triggers InvalidOperationException (no log).
         await RunScenarioAsync(
-            () => JsonOk(new { data = new { ciphertext = (string?)null } }),
+            () => Ok(_nullCiphertextJson),
             p => p.WrapAsync(new byte[] { 1, 2, 3 }));
 
         // 4) Non-2xx on decrypt: triggers LogVaultError + InvalidOperationException.
@@ -536,7 +532,7 @@ public sealed class VaultKeyEncryptionProviderTests
 
         // 6) Missing plaintext on decrypt: triggers InvalidOperationException (no log).
         await RunScenarioAsync(
-            () => JsonOk(new { data = new { plaintext = (string?)null } }),
+            () => Ok(_nullPlaintextJson),
             p => p.UnwrapAsync(new WrappedKey("vault:v1:xxx==", "v1")));
 
         // 7) Malformed base64 on decrypt.
@@ -578,13 +574,7 @@ public sealed class VaultKeyEncryptionProviderTests
         // Regression guard: short bodies pass through unchanged so operators still see
         // the full Vault error verbatim.
         FakeHttpMessageHandler handler = new((request, ct) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden)
-            {
-                Content = new StringContent(
-                    "{\"errors\":[\"permission denied\"]}",
-                    Encoding.UTF8,
-                    "application/json"),
-            }));
+            Task.FromResult(Error(HttpStatusCode.Forbidden, "{\"errors\":[\"permission denied\"]}")));
 
         VaultKeyEncryptionProvider provider = CreateProvider(handler);
 
@@ -602,7 +592,7 @@ public sealed class VaultKeyEncryptionProviderTests
     public void ProviderName_IsVault()
     {
         FakeHttpMessageHandler handler = new((request, ct) =>
-            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)));
+            Task.FromResult(Status(HttpStatusCode.OK)));
         VaultKeyEncryptionProvider provider = CreateProvider(handler);
 
         provider.ProviderName.Should().Be("vault");

@@ -241,7 +241,7 @@ public sealed partial class VaultKeyEncryptionProvider(
         if (!int.TryParse(versionSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out int version) || version < 1)
         {
             throw new InvalidOperationException(
-                $"Vault ciphertext version segment '{versionSpan.ToString()}' is not a positive integer.");
+                $"Vault ciphertext version segment '{versionSpan}' is not a positive integer.");
         }
 
         return "v" + version.ToString(CultureInfo.InvariantCulture);

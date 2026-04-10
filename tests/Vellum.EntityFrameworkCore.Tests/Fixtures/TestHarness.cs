@@ -34,9 +34,10 @@ public sealed class TestHarness : IAsyncDisposable
         // and each gets its own connection — which sidesteps both the "active statements"
         // limitation of a single shared SqliteConnection and the shared-cache quirks of
         // in-memory Microsoft.Data.Sqlite pooling. The file is removed in DisposeAsync.
-        _databasePath = Path.Combine(
-            Path.GetTempPath(),
-            "vellum-test-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".sqlite");
+        string fileName = string.Create(
+            CultureInfo.InvariantCulture,
+            $"vellum-test-{Guid.NewGuid():N}.sqlite");
+        _databasePath = Path.Combine(Path.GetTempPath(), fileName);
         _connectionString = $"Data Source={_databasePath};Pooling=False";
 
         // Primary context + store the test uses by default. EnsureCreated bootstraps the

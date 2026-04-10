@@ -89,7 +89,7 @@ public sealed class StaticServiceCollectionExtensionsTests
 
         using ServiceProvider sp = services.BuildServiceProvider();
 
-        Action act = () => sp.GetRequiredService<IOptions<StaticOptions>>().Value.ToString();
+        Action act = () => _ = sp.GetRequiredService<IOptions<StaticOptions>>().Value;
 
         act.Should().Throw<OptionsValidationException>()
             .WithMessage("*must be a non-empty base64-encoded 32-byte AES-256 key*");
@@ -104,7 +104,7 @@ public sealed class StaticServiceCollectionExtensionsTests
 
         using ServiceProvider sp = services.BuildServiceProvider();
 
-        Action act = () => sp.GetRequiredService<IOptions<StaticOptions>>().Value.ToString();
+        Action act = () => _ = sp.GetRequiredService<IOptions<StaticOptions>>().Value;
 
         act.Should().Throw<OptionsValidationException>()
             .WithMessage("*not valid base64*");
@@ -120,7 +120,7 @@ public sealed class StaticServiceCollectionExtensionsTests
 
         using ServiceProvider sp = services.BuildServiceProvider();
 
-        Action act = () => sp.GetRequiredService<IOptions<StaticOptions>>().Value.ToString();
+        Action act = () => _ = sp.GetRequiredService<IOptions<StaticOptions>>().Value;
 
         act.Should().Throw<OptionsValidationException>()
             .WithMessage("*must decode to exactly 32 bytes*got 16*");

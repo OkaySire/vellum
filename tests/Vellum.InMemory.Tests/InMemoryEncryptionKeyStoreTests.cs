@@ -273,14 +273,13 @@ public sealed class InMemoryEncryptionKeyStoreTests
     [Fact]
     public async Task GetActiveScopesAsync_ReturnsDistinctActiveScopes()
     {
+        // Multiple historical keys per scope (rotated active + deactivated): the scope
+        // should still appear only once in the result.
         InMemoryEncryptionKeyStore store = new();
         await store.CreateAsync(MakeKey(ScopeA));
+        await store.DeactivateAllAsync(ScopeA);
+        await store.CreateAsync(MakeKey(ScopeA));
         await store.CreateAsync(MakeKey(ScopeB));
-        // Simulate a historical deactivated key on ScopeA — scope should still appear only
-        // once thanks to the active one.
-        EncryptionKey inactiveExtra = MakeKey(ScopeA, isActive: false);
-        EncryptionKey? leakedActive = await store.GetActiveAsync(ScopeA);
-        leakedActive.Should().NotBeNull();
 
         IReadOnlyList<string> scopes = await store.GetActiveScopesAsync();
 

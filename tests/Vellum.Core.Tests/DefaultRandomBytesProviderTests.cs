@@ -54,6 +54,10 @@ public sealed class DefaultRandomBytesProviderTests
                 }
             }
 #pragma warning disable CA1031 // test captures any exception to surface the first failure
+            // Intentional broad catch: thread-safety stress test capturing any exception
+            // from 100 parallel threads x 50 iterations. A narrower catch could mask a
+            // regression where Fill starts throwing an unexpected type. See lesson L-7.
+            // lgtm[cs/catch-of-all-exceptions]
             catch (Exception ex)
 #pragma warning restore CA1031
             {

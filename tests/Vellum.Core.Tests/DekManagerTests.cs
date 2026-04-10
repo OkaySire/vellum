@@ -129,7 +129,7 @@ public sealed class DekManagerTests
         // BEFORE our CreateAsync. The fake store's unique-per-scope guard will return the
         // winner from CreateAsync; DekManager must detect the mismatch, zero its losing
         // copy, and unwrap the winner.
-        DekManager sut = BuildSut(out FakeKeyEncryptionProvider provider, out FakeEncryptionKeyStore store, out _, out _);
+        _ = BuildSut(out FakeKeyEncryptionProvider provider, out _, out _, out _);
 
         // We use a custom subclass of the store to inject the race precisely between
         // the double-check and the insert.

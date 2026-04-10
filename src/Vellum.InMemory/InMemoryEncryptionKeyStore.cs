@@ -68,16 +68,9 @@ public sealed partial class InMemoryEncryptionKeyStore : IEncryptionKeyStore
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
 
-        EncryptionKey? active = null;
-        foreach (KeyValuePair<Guid, EncryptionKey> entry in _keysById)
-        {
-            EncryptionKey candidate = entry.Value;
-            if (candidate.IsActive && string.Equals(candidate.Scope, scope, StringComparison.Ordinal))
-            {
-                active = candidate;
-                break;
-            }
-        }
+        EncryptionKey? active = _keysById.Values
+            .FirstOrDefault(candidate =>
+                candidate.IsActive && string.Equals(candidate.Scope, scope, StringComparison.Ordinal));
 
         return Task.FromResult(active);
     }
@@ -172,15 +165,9 @@ public sealed partial class InMemoryEncryptionKeyStore : IEncryptionKeyStore
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
 
-        List<EncryptionKey> matches = new();
-        foreach (KeyValuePair<Guid, EncryptionKey> entry in _keysById)
-        {
-            EncryptionKey candidate = entry.Value;
-            if (string.Equals(candidate.Scope, scope, StringComparison.Ordinal))
-            {
-                matches.Add(candidate);
-            }
-        }
+        List<EncryptionKey> matches = _keysById.Values
+            .Where(candidate => string.Equals(candidate.Scope, scope, StringComparison.Ordinal))
+            .ToList();
 
         matches.Sort(static (left, right) => right.CreatedAt.CompareTo(left.CreatedAt));
         return Task.FromResult<IReadOnlyList<EncryptionKey>>(matches);
@@ -191,14 +178,9 @@ public sealed partial class InMemoryEncryptionKeyStore : IEncryptionKeyStore
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        HashSet<string> scopes = new(StringComparer.Ordinal);
-        foreach (KeyValuePair<Guid, EncryptionKey> entry in _keysById)
-        {
-            if (entry.Value.IsActive)
-            {
-                scopes.Add(entry.Value.Scope);
-            }
-        }
+        HashSet<string> scopes = new(
+            _keysById.Values.Where(key => key.IsActive).Select(key => key.Scope),
+            StringComparer.Ordinal);
 
         List<string> result = new(scopes);
         return Task.FromResult<IReadOnlyList<string>>(result);
@@ -206,15 +188,8 @@ public sealed partial class InMemoryEncryptionKeyStore : IEncryptionKeyStore
 
     private EncryptionKey? FindActiveForScopeUnlocked(string scope)
     {
-        foreach (KeyValuePair<Guid, EncryptionKey> entry in _keysById)
-        {
-            EncryptionKey candidate = entry.Value;
-            if (candidate.IsActive && string.Equals(candidate.Scope, scope, StringComparison.Ordinal))
-            {
-                return candidate;
-            }
-        }
-
-        return null;
+        return _keysById.Values
+            .FirstOrDefault(candidate =>
+                candidate.IsActive && string.Equals(candidate.Scope, scope, StringComparison.Ordinal));
     }
 }
