@@ -1,0 +1,12 @@
+name: "Vellum CodeQL config"
+
+# Why this file exists:
+#   Source-generated C# files (e.g. LoggerMessage.g.cs, VaultJsonContext.*.g.cs)
+#   produce noisy findings we cannot fix — the generator owns those files.
+#   Also exclude standard build output directories.
+
+paths-ignore:
+  - '**/obj/**'
+  - '**/bin/**'
+  - '**/*.g.cs'
+  - '**/generated/**'
