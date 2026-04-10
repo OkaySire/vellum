@@ -1,0 +1,112 @@
+# CodeQL static analysis for Vellum.
+#
+# Why:
+#   Vellum is a cryptographic library destined for public NuGet. CodeQL catches
+#   classic vulnerability patterns (injection, path traversal, unsafe deserialization,
+#   weak crypto, etc.) and is the strongest free static-analysis layer available.
+#   CodeQL is free for private repositories via GitHub's default setup path — no
+#   GitHub Advanced Security license required. If a "requires Advanced Security"
+#   message appears, verify at https://github.com/OkaySire/vellum/settings/security_analysis
+#
+# Query suite:
+#   We deliberately use `security-and-quality` (stricter than `security-extended`)
+#   because a crypto library should flag both unsafe patterns AND code smells that
+#   could become vulnerabilities.
+#
+# Branch protection:
+#   This workflow is intentionally NOT a required status check today. Let it run a
+#   few times to establish a baseline (duration, false-positive rate) before gating
+#   merges on it.
+#
+# .NET SDK installation:
+#   Unlike `build.yml` which installs 8.0.x / 9.0.x / 10.0.x (needed to execute xUnit
+#   across all TFMs), CodeQL only needs ONE build to extract its database. We install
+#   only 10.0.x (matches global.json) to save CI minutes.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly scan: Monday 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (same pattern as build.yml).
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+# Minimum permissions required:
+#   security-events: write  — upload SARIF findings to the Security > Code scanning tab
+#   actions: read           — CodeQL action introspects workflow metadata
+#   contents: read          — checkout the repository
+permissions:
+  security-events: write
+  actions: read
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [csharp]
+
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+      # Skip XML doc processing during restore — unnecessary for CodeQL extraction.
+      NUGET_XMLDOC_MODE: skip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Install the single SDK pinned in global.json. CodeQL builds once; we do
+      # NOT need the net8/net9 runtimes here.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-codeql-${{ hashFiles('**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-codeql-
+            ${{ runner.os }}-nuget-
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      # Autobuild invokes `dotnet restore` + `dotnet build`. It should honor the
+      # committed packages.lock.json files automatically because `RestoreLockedMode`
+      # is enabled project-wide (see Directory.Build.props). If autobuild ever drifts
+      # from the real build (e.g. a lockfile is out of sync or SharedCompilation
+      # interferes with extraction), replace this step with an explicit manual build:
+      #
+      #   - name: Manual build (fallback)
+      #     run: |
+      #       dotnet restore --locked-mode
+      #       dotnet build --configuration Release --no-restore /p:UseSharedCompilation=false
+      #
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
