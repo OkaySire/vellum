@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # NuGet — Central Package Management is supported since early 2024.
+  # Groups keep Microsoft.Extensions.* / EntityFrameworkCore bumps together
+  # so we don't get ten individual PRs for a single patch bump (ref L-8).
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    groups:
+      microsoft-extensions:
+        patterns:
+          - "Microsoft.Extensions.*"
+      entity-framework-core:
+        patterns:
+          - "Microsoft.EntityFrameworkCore*"
+      xunit:
+        patterns:
+          - "xunit*"
+
+  # GitHub Actions — keep actions/checkout, actions/setup-dotnet, actions/cache,
+  # actions/upload-artifact on their latest major release.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
