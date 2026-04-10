@@ -44,6 +44,14 @@ public sealed partial class VaultKeyEncryptionProvider(
 {
     private const string _vaultCiphertextPrefix = "vault:v";
 
+    /// <summary>
+    /// H-2: hard cap on the number of bytes copied from a Vault error response body into log
+    /// entries and exception messages. A malicious or misconfigured Vault (or an interposing
+    /// proxy echoing arbitrary content) could otherwise return megabytes of attacker-controlled
+    /// content that would be embedded verbatim in logs and exceptions.
+    /// </summary>
+    private const int _errorBodyTruncateBytes = 512;
+
     private readonly HttpClient _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
     private readonly VaultOptions _options = (options ?? throw new ArgumentNullException(nameof(options))).Value;
     private readonly ILogger<VaultKeyEncryptionProvider> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -72,9 +80,10 @@ public sealed partial class VaultKeyEncryptionProvider(
         if (!response.IsSuccessStatusCode)
         {
             string errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            LogVaultError(_logger, "encrypt", (int)response.StatusCode, errorBody);
+            string truncatedBody = TruncateForDiagnostics(errorBody);
+            LogVaultError(_logger, "encrypt", (int)response.StatusCode, truncatedBody);
             throw new InvalidOperationException(
-                $"Vault Transit encrypt failed with HTTP {(int)response.StatusCode} ({response.StatusCode}): {errorBody}");
+                $"Vault Transit encrypt failed with HTTP {(int)response.StatusCode} ({response.StatusCode}): {truncatedBody}");
         }
 
         VaultEncryptResponse? parsed;
@@ -130,9 +139,10 @@ public sealed partial class VaultKeyEncryptionProvider(
         if (!response.IsSuccessStatusCode)
         {
             string errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            LogVaultError(_logger, "decrypt", (int)response.StatusCode, errorBody);
+            string truncatedBody = TruncateForDiagnostics(errorBody);
+            LogVaultError(_logger, "decrypt", (int)response.StatusCode, truncatedBody);
             throw new InvalidOperationException(
-                $"Vault Transit decrypt failed with HTTP {(int)response.StatusCode} ({response.StatusCode}): {errorBody}");
+                $"Vault Transit decrypt failed with HTTP {(int)response.StatusCode} ({response.StatusCode}): {truncatedBody}");
         }
 
         VaultDecryptResponse? parsed;
@@ -166,6 +176,30 @@ public sealed partial class VaultKeyEncryptionProvider(
 
         LogDecryptSucceeded(_logger, _options.KeyName);
         return dekBytes;
+    }
+
+    /// <summary>
+    /// H-2: truncates an error body to a small, fixed upper bound before embedding it in log
+    /// entries or exception messages. The truncation is by char count, not byte count, which
+    /// is safe because we are only using the result for human-facing diagnostics — never for
+    /// semantic parsing. The explicit "[truncated, N chars]" suffix makes it obvious to
+    /// operators that content was elided.
+    /// </summary>
+    private static string TruncateForDiagnostics(string body)
+    {
+        if (string.IsNullOrEmpty(body))
+        {
+            return string.Empty;
+        }
+
+        if (body.Length <= _errorBodyTruncateBytes)
+        {
+            return body;
+        }
+
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{body.AsSpan(0, _errorBodyTruncateBytes)}... [truncated, original length {body.Length} chars]");
     }
 
     /// <summary>

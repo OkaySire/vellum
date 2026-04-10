@@ -191,6 +191,7 @@ public sealed partial class DekManager(
         }
 
         byte[] dekBytes = await _keyProvider.UnwrapAsync(persisted.WrappedKey, cancellationToken).ConfigureAwait(false);
+        EnsureDekLength(dekBytes);
         Dek dek = new(dekBytes, persisted.KeyId, persisted.WrappedKey);
 
         CacheByKeyId(scope, dek);
@@ -201,11 +202,29 @@ public sealed partial class DekManager(
     private async Task<Dek> LoadAndCacheAsync(EncryptionKey persisted, CancellationToken cancellationToken)
     {
         byte[] dekBytes = await _keyProvider.UnwrapAsync(persisted.WrappedKey, cancellationToken).ConfigureAwait(false);
+        EnsureDekLength(dekBytes);
         Dek dek = new(dekBytes, persisted.KeyId, persisted.WrappedKey);
 
         CacheActiveDek(persisted.Scope, dek);
         LogDekLoadedFromStore(_logger, persisted.Scope);
         return CloneDek(dek);
+    }
+
+    /// <summary>
+    /// H-1: enforces the AES-256 DEK length contract on every unwrap path. <see cref="AesGcm"/>
+    /// accepts 16/24/32-byte keys; silently accepting a shorter key would downgrade the cipher
+    /// strength. Buggy or compromised KEK providers must be rejected here to preserve the
+    /// symmetry with <see cref="DekSizeBytes"/> enforcement on the generate path.
+    /// </summary>
+    private static void EnsureDekLength(byte[] dekBytes)
+    {
+        if (dekBytes.Length != DekSizeBytes)
+        {
+            int actualLength = dekBytes.Length;
+            CryptographicOperations.ZeroMemory(dekBytes);
+            throw new CryptographicException(
+                $"Unwrapped DEK has invalid length: expected {DekSizeBytes} bytes (AES-256), got {actualLength}.");
+        }
     }
 
     private void CacheActiveDek(string scope, Dek dek)

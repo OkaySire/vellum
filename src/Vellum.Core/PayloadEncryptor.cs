@@ -35,6 +35,7 @@ public sealed partial class PayloadEncryptor(
 {
     private const int NonceSize = 12;
     private const int TagSize = 16;
+    private const int DekSizeBytes = 32;
 
     private readonly IDekManager _dekManager = dekManager ?? throw new ArgumentNullException(nameof(dekManager));
     private readonly IKeyEncryptionProvider _keyProvider = keyProvider ?? throw new ArgumentNullException(nameof(keyProvider));
@@ -104,6 +105,17 @@ public sealed partial class PayloadEncryptor(
         byte[] dekBytes = await _keyProvider.UnwrapAsync(payload.WrappedDek, cancellationToken).ConfigureAwait(false);
         try
         {
+            // H-1: fail-closed if the KEK provider returned a key of unexpected length.
+            // AES-GCM accepts 16/24/32-byte keys; Vellum's contract is AES-256. A buggy or
+            // compromised provider returning a shorter key would silently downgrade the
+            // cipher strength. Rejecting here preserves the AES-256 invariant on the
+            // decrypt path in symmetry with DekManager.CreateDekAsync on the create path.
+            if (dekBytes.Length != DekSizeBytes)
+            {
+                throw new CryptographicException(
+                    $"Unwrapped DEK has invalid length: expected {DekSizeBytes} bytes (AES-256), got {dekBytes.Length}.");
+            }
+
             int ciphertextLength = payload.Ciphertext.Length - TagSize;
             ReadOnlySpan<byte> ciphertext = payload.Ciphertext.AsSpan(0, ciphertextLength);
             ReadOnlySpan<byte> tag = payload.Ciphertext.AsSpan(ciphertextLength, TagSize);

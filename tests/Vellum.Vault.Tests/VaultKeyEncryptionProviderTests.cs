@@ -400,6 +400,85 @@ public sealed class VaultKeyEncryptionProviderTests
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
     }
 
+    // ---------------------------------------------------------------------
+    // H-2 — error body truncation
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public async Task WrapAsync_LargeErrorBody_IsTruncatedInExceptionMessage()
+    {
+        // H-2: a huge error body (e.g. an HTML page from a misrouted proxy) must not be
+        // embedded verbatim in the exception message. The truncated body keeps diagnostics
+        // useful without turning the exception into a vector for attacker-controlled content.
+        string oversizedBody = new string('A', 100_000);
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent(oversizedBody, Encoding.UTF8, "text/html"),
+            }));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        Func<Task> act = async () => await provider.WrapAsync(new byte[] { 1, 2, 3 });
+
+        ExceptionAssertions<InvalidOperationException> caught =
+            await act.Should().ThrowAsync<InvalidOperationException>();
+
+        caught.Which.Message.Length.Should().BeLessThan(1_000,
+            "the oversized body must be truncated before embedding into the exception");
+        caught.Which.Message.Should().Contain("truncated");
+        caught.Which.Message.Should().Contain("100000");
+    }
+
+    [Fact]
+    public async Task UnwrapAsync_LargeErrorBody_IsTruncatedInExceptionMessage()
+    {
+        // H-2 symmetry on the decrypt path.
+        string oversizedBody = new string('B', 50_000);
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadGateway)
+            {
+                Content = new StringContent(oversizedBody, Encoding.UTF8, "text/plain"),
+            }));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        Func<Task> act = async () => await provider.UnwrapAsync(new WrappedKey("vault:v1:xxx==", "v1"));
+
+        ExceptionAssertions<InvalidOperationException> caught =
+            await act.Should().ThrowAsync<InvalidOperationException>();
+
+        caught.Which.Message.Length.Should().BeLessThan(1_000);
+        caught.Which.Message.Should().Contain("truncated");
+        caught.Which.Message.Should().Contain("50000");
+    }
+
+    [Fact]
+    public async Task WrapAsync_SmallErrorBody_IsNotMarkedAsTruncated()
+    {
+        // Regression guard: short bodies pass through unchanged so operators still see
+        // the full Vault error verbatim.
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden)
+            {
+                Content = new StringContent(
+                    "{\"errors\":[\"permission denied\"]}",
+                    Encoding.UTF8,
+                    "application/json"),
+            }));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        Func<Task> act = async () => await provider.WrapAsync(new byte[] { 1, 2, 3 });
+
+        ExceptionAssertions<InvalidOperationException> caught =
+            await act.Should().ThrowAsync<InvalidOperationException>();
+
+        caught.Which.Message.Should().Contain("permission denied");
+        caught.Which.Message.Should().NotContain("truncated",
+            "short bodies must pass through without the truncation marker");
+    }
+
     [Fact]
     public void ProviderName_IsVault()
     {

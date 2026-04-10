@@ -167,4 +167,65 @@ public sealed class PayloadEncryptorTests
 
         decrypted.Should().Be("Hé, Vellum!");
     }
+
+    [Fact]
+    public async Task Decrypt_ProviderReturnsShortDek_ThrowsAndPreservesAes256Contract()
+    {
+        // H-1: pin the fail-closed behavior on the unwrap path. A buggy or compromised KEK
+        // provider returning a 16-byte DEK must NOT silently downgrade the envelope to
+        // AES-128. PayloadEncryptor must reject the unwrapped key and throw before calling
+        // AesGcm.Decrypt.
+        FakeKeyEncryptionProvider realProvider = new();
+        FakeEncryptionKeyStore store = new();
+        CountingRandomBytesProvider random = new();
+        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumOptions options = new();
+
+        DekManager dekManager = new(
+            realProvider,
+            store,
+            cache,
+            random,
+            TimeProvider.System,
+            Options.Create(options),
+            NullLogger<DekManager>.Instance);
+
+        PayloadEncryptor encryptor = new(
+            dekManager,
+            realProvider,
+            random,
+            NullLogger<PayloadEncryptor>.Instance);
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("downgrade check");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
+
+        // Now build a decrypt-side encryptor whose KEK provider returns 16 bytes instead
+        // of 32. Re-use the envelope minted above so everything else is legitimate.
+        ShortDekKeyEncryptionProvider shortProvider = new(dekBytesLength: 16);
+        PayloadEncryptor decryptOnly = new(
+            dekManager,
+            shortProvider,
+            random,
+            NullLogger<PayloadEncryptor>.Instance);
+
+        Func<Task> act = async () => await decryptOnly.DecryptAsync(envelope);
+        await act.Should().ThrowAsync<CryptographicException>()
+            .WithMessage("*expected 32 bytes*");
+    }
+
+    /// <summary>
+    /// Minimal KEK provider whose <see cref="UnwrapAsync"/> returns a buffer of the
+    /// configured length, regardless of what was wrapped. Used to prove that Vellum
+    /// rejects short/long DEKs on the decrypt path.
+    /// </summary>
+    private sealed class ShortDekKeyEncryptionProvider(int dekBytesLength) : IKeyEncryptionProvider
+    {
+        public string ProviderName => "short-fake";
+
+        public Task<WrappedKey> WrapAsync(ReadOnlyMemory<byte> dek, CancellationToken cancellationToken = default)
+            => Task.FromResult(new WrappedKey("short:v1", "v1"));
+
+        public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+            => Task.FromResult(new byte[dekBytesLength]);
+    }
 }

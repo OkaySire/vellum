@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using FluentAssertions;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -235,6 +236,87 @@ public sealed class DekManagerTests
         // it must go to the store, which returns null, which must throw.
         Func<Task> act = async () => await sut.GetDekByKeyIdAsync(sharedKeyId, "tenant:B");
         await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task GetActiveDekAsync_ProviderReturnsShortDek_ThrowsAndFailsClosed()
+    {
+        // H-1: the load path (LoadAndCacheAsync) must reject any unwrapped DEK whose length
+        // is not exactly 32 bytes. Pinning this prevents a buggy KEK provider from silently
+        // downgrading the AES-256 contract on the cache-miss path.
+        ShortDekProvider shortProvider = new(dekBytesLength: 16);
+        FakeEncryptionKeyStore store = new();
+        CountingRandomBytesProvider random = new();
+        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumOptions options = new();
+
+        DekManager sut = new(
+            shortProvider,
+            store,
+            cache,
+            random,
+            TimeProvider.System,
+            Options.Create(options),
+            NullLogger<DekManager>.Instance);
+
+        // Pre-seed so the slow path lands on LoadAndCacheAsync, not CreateDekAsync.
+        EncryptionKey preseed = new(
+            Guid.NewGuid(),
+            Scope,
+            new WrappedKey("short:v1", "v1"),
+            DateTimeOffset.UtcNow,
+            null,
+            true);
+        store.SeedKey(preseed);
+
+        Func<Task> act = async () => await sut.GetActiveDekAsync(Scope);
+        await act.Should().ThrowAsync<CryptographicException>()
+            .WithMessage("*expected 32 bytes*");
+    }
+
+    [Fact]
+    public async Task GetDekByKeyIdAsync_ProviderReturnsShortDek_ThrowsAndFailsClosed()
+    {
+        // H-1: the by-id slow path (GetDekByKeyIdSlowAsync) must also reject unwrapped DEKs
+        // of the wrong length. Symmetry with the active-slow-path guard above.
+        ShortDekProvider shortProvider = new(dekBytesLength: 24);
+        FakeEncryptionKeyStore store = new();
+        CountingRandomBytesProvider random = new();
+        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumOptions options = new();
+
+        DekManager sut = new(
+            shortProvider,
+            store,
+            cache,
+            random,
+            TimeProvider.System,
+            Options.Create(options),
+            NullLogger<DekManager>.Instance);
+
+        EncryptionKey preseed = new(
+            Guid.NewGuid(),
+            Scope,
+            new WrappedKey("short:v1", "v1"),
+            DateTimeOffset.UtcNow,
+            null,
+            true);
+        store.SeedKey(preseed);
+
+        Func<Task> act = async () => await sut.GetDekByKeyIdAsync(preseed.KeyId, Scope);
+        await act.Should().ThrowAsync<CryptographicException>()
+            .WithMessage("*expected 32 bytes*");
+    }
+
+    private sealed class ShortDekProvider(int dekBytesLength) : IKeyEncryptionProvider
+    {
+        public string ProviderName => "short-fake";
+
+        public Task<WrappedKey> WrapAsync(ReadOnlyMemory<byte> dek, CancellationToken cancellationToken = default)
+            => Task.FromResult(new WrappedKey("short:v1", "v1"));
+
+        public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+            => Task.FromResult(new byte[dekBytesLength]);
     }
 
     /// <summary>

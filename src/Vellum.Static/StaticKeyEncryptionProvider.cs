@@ -59,8 +59,32 @@ public sealed partial class StaticKeyEncryptionProvider : IKeyEncryptionProvider
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
 
+        EnsureAesGcmTagSupport();
+
         _options = options.Value;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// H-3: on net8 the code below constructs <see cref="AesGcm"/> via the parameterless-tag
+    /// overload (the explicit-tag overload did not exist on that TFM), so the tag size falls
+    /// back to the BCL default. The default matches <see cref="_tagLengthBytes"/> (16 bytes)
+    /// on every shipped BCL, but it is implementation-defined. This assertion runs on every
+    /// instance construction (the provider is DI-singleton, so effectively once per process)
+    /// to guarantee that the running BCL supports a 16-byte tag. A future BCL change that
+    /// shrinks <see cref="AesGcm.TagByteSizes"/> will fail closed at startup rather than
+    /// silently weaken the authentication guarantee on the net8 path. On net9+ the assertion
+    /// is redundant (the explicit-tag overload pins the value) but runs anyway as defence-in-depth.
+    /// </summary>
+    private static void EnsureAesGcmTagSupport()
+    {
+        if (AesGcm.TagByteSizes.MaxSize < _tagLengthBytes)
+        {
+            throw new InvalidOperationException(
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"AesGcm.TagByteSizes.MaxSize is {AesGcm.TagByteSizes.MaxSize} but Vellum.Static requires a {_tagLengthBytes}-byte authentication tag. This BCL is not supported."));
+        }
     }
 
     /// <inheritdoc />
