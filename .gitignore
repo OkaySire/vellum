@@ -50,6 +50,10 @@ $RECYCLE.BIN/
 # Jacquouille bus state
 .jacq/
 
+# Agent-internal files (not shipped to public repo)
+CLAUDE.md
+tasks/
+
 # Secrets
 **/appsettings.Development.json
 **/appsettings.Local.json
