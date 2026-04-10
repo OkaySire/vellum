@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq;
 
 namespace Vellum.Tests.Fakes;
 
@@ -68,12 +69,12 @@ public sealed class FakeEncryptionKeyStore : IEncryptionKeyStore
         DeactivateCalls++;
         lock (_lock)
         {
-            foreach (KeyValuePair<Guid, EncryptionKey> entry in _byId.ToArray())
+            KeyValuePair<Guid, EncryptionKey>[] targets = _byId
+                .Where(entry => string.Equals(entry.Value.Scope, scope, StringComparison.Ordinal) && entry.Value.IsActive)
+                .ToArray();
+            foreach (KeyValuePair<Guid, EncryptionKey> entry in targets)
             {
-                if (string.Equals(entry.Value.Scope, scope, StringComparison.Ordinal) && entry.Value.IsActive)
-                {
-                    _byId[entry.Key] = entry.Value with { IsActive = false };
-                }
+                _byId[entry.Key] = entry.Value with { IsActive = false };
             }
         }
 

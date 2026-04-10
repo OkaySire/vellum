@@ -34,10 +34,13 @@ public sealed class TestHarness : IAsyncDisposable
         // and each gets its own connection — which sidesteps both the "active statements"
         // limitation of a single shared SqliteConnection and the shared-cache quirks of
         // in-memory Microsoft.Data.Sqlite pooling. The file is removed in DisposeAsync.
+        // Path.Join (not Path.Combine) is used on purpose: the filename is fully controlled
+        // here (constant prefix + Guid) so the absolute-path semantics of Path.Combine would
+        // be a footgun for nothing, and CodeQL's cs/path-combine rule flags the ambiguity.
         string fileName = string.Create(
             CultureInfo.InvariantCulture,
             $"vellum-test-{Guid.NewGuid():N}.sqlite");
-        _databasePath = Path.Combine(Path.GetTempPath(), fileName);
+        _databasePath = Path.Join(Path.GetTempPath(), fileName);
         _connectionString = $"Data Source={_databasePath};Pooling=False";
 
         // Primary context + store the test uses by default. EnsureCreated bootstraps the
