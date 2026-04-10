@@ -286,6 +286,54 @@ public sealed class EntityFrameworkCoreEncryptionKeyStoreTests
         scopes.Should().Contain(ScopeA);
     }
 
+    // ---------- M-4 — DbUpdateException without a race winner ----------
+
+    [Fact]
+    public async Task CreateAsync_DbUpdateExceptionWithoutRaceWinner_ThrowsInvalidOperationException()
+    {
+        // M-4: fail-closed behaviour when a DbUpdateException is caused by something OTHER
+        // than the filtered-unique-index race. Pre-seed a row with the same KeyId on a
+        // DIFFERENT scope so the primary-key constraint trips on SaveChanges in a fresh
+        // store/context, then the store must NOT silently swallow the error. It must
+        // re-throw as InvalidOperationException with the original DbUpdateException
+        // preserved as InnerException.
+        //
+        // The second store is deliberately constructed from a fresh DbContext so the change
+        // tracker does not see the pre-existing row locally — the PK collision happens at
+        // the database level (DbUpdateException) rather than at the tracker level (which
+        // would throw a raw InvalidOperationException with no InnerException).
+        await using TestHarness harness = new();
+
+        Guid sharedKeyId = Guid.NewGuid();
+
+        EncryptionKey preexisting = new(
+            KeyId: sharedKeyId,
+            Scope: "tenant:other",
+            WrappedKey: new WrappedKey("ciphertext-preexisting", "v1"),
+            CreatedAt: DateTimeOffset.UtcNow,
+            ExpiresAt: null,
+            IsActive: false);
+        await harness.Store.CreateAsync(preexisting);
+
+        EntityFrameworkCoreEncryptionKeyStore<TestDbContext> freshStore = harness.CreateStore();
+
+        // New scope with no active key, but reuse the same KeyId — this collides on the PK.
+        EncryptionKey colliding = new(
+            KeyId: sharedKeyId,
+            Scope: "tenant:fresh",
+            WrappedKey: new WrappedKey("ciphertext-colliding", "v1"),
+            CreatedAt: DateTimeOffset.UtcNow,
+            ExpiresAt: null,
+            IsActive: true);
+
+        Func<Task> act = async () => await freshStore.CreateAsync(colliding);
+
+        (await act.Should().ThrowAsync<InvalidOperationException>(
+                "the DbUpdateException is NOT a filtered-unique-index race so the store must fail closed"))
+            .Which.InnerException.Should().BeAssignableTo<DbUpdateException>(
+                "the original DbUpdateException must be preserved as the inner exception");
+    }
+
     // ---------- Argument validation ----------
 
     [Fact]

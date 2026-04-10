@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Vellum.InMemory;
 
@@ -37,10 +39,28 @@ namespace Vellum.InMemory;
 /// filters (see <c>tasks/lessons.md</c> L1).
 /// </para>
 /// </remarks>
-public sealed class InMemoryEncryptionKeyStore : IEncryptionKeyStore
+public sealed partial class InMemoryEncryptionKeyStore : IEncryptionKeyStore
 {
     private readonly ConcurrentDictionary<Guid, EncryptionKey> _keysById = new();
     private readonly object _writeLock = new();
+    private readonly ILogger<InMemoryEncryptionKeyStore> _logger;
+
+    /// <summary>
+    /// Initializes a new instance with a <see cref="NullLogger{T}"/>. Kept for tests and
+    /// samples that construct the store directly without DI.
+    /// </summary>
+    public InMemoryEncryptionKeyStore()
+        : this(NullLogger<InMemoryEncryptionKeyStore>.Instance)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance with the specified logger. Used by DI.
+    /// </summary>
+    public InMemoryEncryptionKeyStore(ILogger<InMemoryEncryptionKeyStore> logger)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
 
     /// <inheritdoc />
     public Task<EncryptionKey?> GetActiveAsync(string scope, CancellationToken cancellationToken = default)
@@ -70,6 +90,7 @@ public sealed class InMemoryEncryptionKeyStore : IEncryptionKeyStore
 
         if (!_keysById.TryGetValue(keyId, out EncryptionKey? key))
         {
+            LogGetByIdMissNotFound(_logger, keyId, scope);
             return Task.FromResult<EncryptionKey?>(null);
         }
 
@@ -77,11 +98,27 @@ public sealed class InMemoryEncryptionKeyStore : IEncryptionKeyStore
         // A mismatch fails closed — return null, do not leak the key.
         if (!string.Equals(key.Scope, scope, StringComparison.Ordinal))
         {
+            // M-6: log the scope mismatch so an in-memory-store-backed deployment emits the
+            // same cross-tenant audit signal as the EF Core-backed store. Distinct message
+            // from the plain-miss case above so consumers can SIEM-alert on it separately.
+            LogGetByIdMissScopeMismatch(_logger, keyId, scope, key.Scope);
             return Task.FromResult<EncryptionKey?>(null);
         }
 
         return Task.FromResult<EncryptionKey?>(key);
     }
+
+    [LoggerMessage(
+        EventId = 2001,
+        Level = LogLevel.Debug,
+        Message = "In-memory store: key {KeyId} not found for scope {Scope}")]
+    private static partial void LogGetByIdMissNotFound(ILogger logger, Guid keyId, string scope);
+
+    [LoggerMessage(
+        EventId = 2002,
+        Level = LogLevel.Warning,
+        Message = "In-memory store: key {KeyId} was requested for scope {RequestedScope} but belongs to scope {ActualScope}")]
+    private static partial void LogGetByIdMissScopeMismatch(ILogger logger, Guid keyId, string requestedScope, string actualScope);
 
     /// <inheritdoc />
     public Task<EncryptionKey> CreateAsync(EncryptionKey key, CancellationToken cancellationToken = default)

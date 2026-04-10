@@ -131,4 +131,68 @@ public sealed class AbstractionsSmokeTests
                 System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription);
         }
     }
+
+    [Fact]
+    public void EncryptedPayload_ToString_HidesCiphertextAndWrappedKey()
+    {
+        // M-1: pin the safe ToString override. The compiler-generated record ToString
+        // would print Ciphertext, Nonce, and WrappedDek verbatim. The override returns a
+        // fixed summary with lengths only.
+        byte[] ciphertext = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        byte[] nonce = [0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44];
+        string sensitiveCiphertext = "vault:v1:SENSITIVE-DO-NOT-LOG";
+        WrappedKey wrapped = new(sensitiveCiphertext, "v1");
+        EncryptedPayload envelope = new(ciphertext, nonce, wrapped, Guid.NewGuid());
+
+        string printed = envelope.ToString();
+
+        printed.Should().NotContain(sensitiveCiphertext, "the wrapped ciphertext must never appear in ToString output");
+        printed.Should().Contain($"KeyId = {envelope.KeyId}");
+        printed.Should().Contain($"CiphertextLength = {ciphertext.Length}");
+        printed.Should().Contain($"NonceLength = {nonce.Length}");
+    }
+
+    [Fact]
+    public void Dek_ToString_HidesKeyBytes()
+    {
+        // M-2: pin the safe ToString override. Must never expose hex or base64 of the
+        // key bytes, only a fixed KeyId + KeyLength summary.
+        //
+        // We use a deterministic key pattern (00,01,02,...,1F) and check for the EXACT
+        // hex/base64 string representation of the buffer rather than searching for
+        // individual byte substrings. Looking for a 2-char hex substring is statistically
+        // useless (1 in 16 collision per position in the GUID alone) and historically
+        // produced a flaky test that collided with hex characters inside the KeyId guid.
+        byte[] key = new byte[32];
+        for (int i = 0; i < key.Length; i++)
+        {
+            key[i] = (byte)i;
+        }
+
+        Dek dek = new(key, Guid.NewGuid(), new WrappedKey("vault:v1:abc", "v1"));
+
+        string printed = dek.ToString();
+
+        printed.Should().Contain($"KeyId = {dek.KeyId}");
+        printed.Should().Contain("KeyLength = 32");
+
+        // The deterministic full hex/base64 of the buffer must NOT appear anywhere.
+        string hexRepresentation = Convert.ToHexString(key);
+        string base64Representation = Convert.ToBase64String(key);
+        printed.Should().NotContain(hexRepresentation,
+            "full hex representation of key bytes must not leak");
+        printed.Should().NotContain(base64Representation,
+            "full base64 representation of key bytes must not leak");
+
+        // And the type-name fallback must not appear either (the compiler-generated
+        // output prints "Key = System.Byte[]").
+        printed.Should().NotContain("System.Byte");
+
+        // Belt-and-braces: ToString() must be a fixed-size summary, bounded well below
+        // the size of any reasonable buffer echo. 128 chars is comfortably above the
+        // expected "Dek { KeyId = <guid>, KeyLength = 32 }" (~60 chars) and well below
+        // the size of a hex-dumped 32-byte key (~64 chars plus formatting noise).
+        printed.Length.Should().BeLessThan(128,
+            "ToString must be a fixed-size summary, not contain the key buffer");
+    }
 }

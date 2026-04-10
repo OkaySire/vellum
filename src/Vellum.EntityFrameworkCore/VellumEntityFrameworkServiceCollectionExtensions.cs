@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
+using Vellum.EntityFrameworkCore.Internal;
 
 namespace Vellum.EntityFrameworkCore;
 
@@ -39,7 +41,14 @@ public static class VellumEntityFrameworkServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         services.AddOptions<VellumEntityFrameworkOptions>()
-            .Configure(configure ?? (_ => { }));
+            .Configure(configure ?? (_ => { }))
+            .ValidateOnStart();
+
+        // M-7: bring EF Core in line with Vellum.Static and Vellum.Vault, both of which
+        // validate options on start. Misconfigurations like an empty TableName or a
+        // zero-length scope fail here rather than later inside OnModelCreating.
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IValidateOptions<VellumEntityFrameworkOptions>, VellumEntityFrameworkOptionsValidator>());
 
         services.TryAddScoped<EntityFrameworkCoreEncryptionKeyStore<TContext>>();
         services.TryAddScoped<IEncryptionKeyStore>(sp =>

@@ -180,13 +180,22 @@ public sealed partial class DekManager(
 
     private async Task<Dek> GetDekByKeyIdSlowAsync(Guid keyId, string scope, CancellationToken cancellationToken)
     {
-        EncryptionKey? persisted = await _store.GetByIdAsync(keyId, scope, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException($"Encryption key {keyId} not found for scope '{scope}'.");
+        EncryptionKey? persisted = await _store.GetByIdAsync(keyId, scope, cancellationToken).ConfigureAwait(false);
+        if (persisted is null)
+        {
+            // M-5: distinct EventId for "not found" so SIEM rules can distinguish a genuine
+            // misconfiguration from a cross-tenant lookup attempt.
+            LogDekNotFound(_logger, keyId, scope);
+            throw new InvalidOperationException($"Encryption key {keyId} not found for scope '{scope}'.");
+        }
 
         // Defense-in-depth: the store MUST already enforce scope match, but double-check here
         // so that a buggy store implementation cannot leak cross-tenant keys through Vellum.
         if (!string.Equals(persisted.Scope, scope, StringComparison.Ordinal))
         {
+            // M-5: distinct EventId for "cross-scope attempt" — this is a security event
+            // that should be alertable independently of the "not found" case.
+            LogDekScopeMismatch(_logger, keyId, scope, persisted.Scope);
             throw new InvalidOperationException($"Encryption key {keyId} does not belong to scope '{scope}'.");
         }
 
@@ -282,4 +291,20 @@ public sealed partial class DekManager(
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "DEK creation race detected for scope {Scope}, reconciling with the winner")]
     private static partial void LogDekRaceConditionHandled(ILogger logger, string scope);
+
+    // M-5: the next two messages use explicit, stable EventIds (distinct from one another)
+    // so that SIEM rules can alert on a cross-scope lookup attempt without firing on a
+    // benign "key not found" misconfiguration. EventId 1001 = not found, 1002 = scope mismatch.
+
+    [LoggerMessage(
+        EventId = 1001,
+        Level = LogLevel.Warning,
+        Message = "DEK lookup missed: key {KeyId} is not present for scope {Scope}")]
+    private static partial void LogDekNotFound(ILogger logger, Guid keyId, string scope);
+
+    [LoggerMessage(
+        EventId = 1002,
+        Level = LogLevel.Warning,
+        Message = "DEK scope mismatch: key {KeyId} was requested for scope {RequestedScope} but belongs to scope {ActualScope}")]
+    private static partial void LogDekScopeMismatch(ILogger logger, Guid keyId, string requestedScope, string actualScope);
 }

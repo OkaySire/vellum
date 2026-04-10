@@ -1,5 +1,7 @@
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using Vellum.InMemory;
+using Vellum.InMemory.Tests.Fakes;
 using Xunit;
 
 namespace Vellum.InMemory.Tests;

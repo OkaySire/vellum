@@ -37,4 +37,16 @@
     <ProjectReference Include="..\..\src\Vellum.EntityFrameworkCore\Vellum.EntityFrameworkCore.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      TestOptionsAccessor.Current is a static slot mutated by TestHarness and by
+      VellumEntityFrameworkServiceCollectionExtensionsTests. xUnit parallelises test
+      classes within an assembly by default; two classes mutating the same static state
+      concurrently race and produce flaky failures. Disabling test-collection parallelism
+      keeps the test project simple (no [Collection] wiring on every class) at a tiny
+      cost in wall-clock time.
+    -->
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

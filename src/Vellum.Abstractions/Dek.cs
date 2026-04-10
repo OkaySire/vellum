@@ -36,4 +36,15 @@ namespace Vellum;
     "Performance",
     "CA1819:Properties should not return arrays",
     Justification = "Dek carries mutable key material by design so that callers can zero memory after use. ReadOnlyMemory<byte> would prevent callers from scrubbing the underlying storage.")]
-public sealed record Dek(byte[] Key, Guid KeyId, WrappedKey WrappedKey);
+public sealed record Dek(byte[] Key, Guid KeyId, WrappedKey WrappedKey)
+{
+    /// <summary>
+    /// M-2: returns a fixed safe summary. The compiler-generated <c>ToString()</c> happens to
+    /// print <c>Key = System.Byte[]</c> today (safe by accident — <c>byte[]</c>'s default
+    /// <c>ToString</c> is its type name), but a future refactor that wraps the key bytes in a
+    /// type with a content-printing <c>ToString</c> could leak key material. This explicit
+    /// override pins the invariant regardless of the <see cref="Key"/> storage type.
+    /// </summary>
+    public override string ToString() =>
+        $"Dek {{ KeyId = {KeyId}, KeyLength = {Key.Length} }}";
+}

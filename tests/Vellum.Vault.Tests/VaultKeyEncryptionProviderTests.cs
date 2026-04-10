@@ -453,6 +453,125 @@ public sealed class VaultKeyEncryptionProviderTests
         caught.Which.Message.Should().Contain("50000");
     }
 
+    // ---------------------------------------------------------------------
+    // M-3 — "No Vault token in logs" invariant pinner
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public async Task VaultKeyEncryptionProvider_NeverLogsOrThrowsVaultToken()
+    {
+        // M-3: pin the invariant that the configured Vault token is never embedded in any log
+        // entry or exception message (including InnerException chains and the full ToString()
+        // dump). The provider already upholds this — the token only ever appears as an
+        // HttpClient default header and is never interpolated into LoggerMessage templates or
+        // exception messages — but an accidental refactor could regress silently without this
+        // test.
+        const string distinctiveToken = "hvs.test-secret-12345";
+        CapturingLogger<VaultKeyEncryptionProvider> capture = new();
+
+        VaultOptions options = new()
+        {
+            Address = "http://vault.test:8200",
+            Token = distinctiveToken,
+            KeyName = "pinner-key",
+            HttpTimeout = TimeSpan.FromSeconds(10),
+        };
+
+        List<Exception> thrownExceptions = [];
+
+        async Task RunScenarioAsync(
+            Func<HttpResponseMessage> responseFactory,
+            Func<VaultKeyEncryptionProvider, Task> action)
+        {
+            FakeHttpMessageHandler handler = new((request, ct) => Task.FromResult(responseFactory()));
+            HttpClient httpClient = new(handler)
+            {
+                BaseAddress = new Uri(options.Address + "/"),
+                Timeout = options.HttpTimeout,
+            };
+            httpClient.DefaultRequestHeaders.Add("X-Vault-Token", options.Token);
+            VaultKeyEncryptionProvider provider = new(httpClient, Options.Create(options), capture);
+            try
+            {
+                await action(provider).ConfigureAwait(false);
+            }
+#pragma warning disable CA1031 // test intentionally catches every exception so it can scan each one for the token
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                thrownExceptions.Add(ex);
+            }
+        }
+
+        // 1) Non-2xx on encrypt: triggers LogVaultError + InvalidOperationException.
+        await RunScenarioAsync(
+            () => new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent("internal boom", Encoding.UTF8, "text/plain"),
+            },
+            p => p.WrapAsync(new byte[] { 1, 2, 3 }));
+
+        // 2) Malformed JSON on encrypt: triggers LogJsonParseFailed + JsonException.
+        await RunScenarioAsync(
+            () => Ok("this-is-not-json"),
+            p => p.WrapAsync(new byte[] { 1, 2, 3 }));
+
+        // 3) Missing ciphertext on encrypt: triggers InvalidOperationException (no log).
+        await RunScenarioAsync(
+            () => JsonOk(new { data = new { ciphertext = (string?)null } }),
+            p => p.WrapAsync(new byte[] { 1, 2, 3 }));
+
+        // 4) Non-2xx on decrypt: triggers LogVaultError + InvalidOperationException.
+        await RunScenarioAsync(
+            () => new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent("decrypt boom", Encoding.UTF8, "text/plain"),
+            },
+            p => p.UnwrapAsync(new WrappedKey("vault:v1:xxx==", "v1")));
+
+        // 5) Malformed JSON on decrypt: triggers LogJsonParseFailed + JsonException.
+        await RunScenarioAsync(
+            () => Ok("definitely-not-json"),
+            p => p.UnwrapAsync(new WrappedKey("vault:v1:xxx==", "v1")));
+
+        // 6) Missing plaintext on decrypt: triggers InvalidOperationException (no log).
+        await RunScenarioAsync(
+            () => JsonOk(new { data = new { plaintext = (string?)null } }),
+            p => p.UnwrapAsync(new WrappedKey("vault:v1:xxx==", "v1")));
+
+        // 7) Malformed base64 on decrypt.
+        await RunScenarioAsync(
+            () => JsonOk(new { data = new { plaintext = "!!!not-base64!!!" } }),
+            p => p.UnwrapAsync(new WrappedKey("vault:v1:xxx==", "v1")));
+
+        // Sanity: the scenarios above must actually produce the exceptions we claim.
+        thrownExceptions.Should().NotBeEmpty("the test would be vacuous if no exception was thrown");
+
+        // Assert: no log entry contains the token.
+        foreach (CapturedLogEntry entry in capture.Entries)
+        {
+            entry.Message.Should().NotContain(distinctiveToken,
+                "LoggerMessage templates must never interpolate the Vault token");
+            entry.Exception?.ToString().Should().NotContain(distinctiveToken,
+                "logged exception chains must never surface the Vault token");
+        }
+
+        // Assert: no thrown exception — message, ToString, or InnerException chain — contains the token.
+        foreach (Exception ex in thrownExceptions)
+        {
+            ex.Message.Should().NotContain(distinctiveToken);
+            ex.ToString().Should().NotContain(distinctiveToken);
+
+            Exception? inner = ex.InnerException;
+            while (inner is not null)
+            {
+                inner.Message.Should().NotContain(distinctiveToken);
+                inner.ToString().Should().NotContain(distinctiveToken);
+                inner = inner.InnerException;
+            }
+        }
+    }
+
     [Fact]
     public async Task WrapAsync_SmallErrorBody_IsNotMarkedAsTruncated()
     {
