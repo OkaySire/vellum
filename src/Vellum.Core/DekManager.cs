@@ -152,6 +152,21 @@ public sealed partial class DekManager(
     }
 
     /// <inheritdoc />
+    public ValueTask<Dek> GetDekByWrappedKeyAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(wrappedKey);
+
+        string cacheKey = BuildWrappedCacheKey(wrappedKey);
+        if (_cache.TryGetValue(cacheKey, out Dek? cached) && cached is not null)
+        {
+            LogDekWrappedCacheHit(_logger);
+            return new ValueTask<Dek>(CloneDek(cached));
+        }
+
+        return new ValueTask<Dek>(GetDekByWrappedKeySlowAsync(wrappedKey, cacheKey, cancellationToken));
+    }
+
+    /// <inheritdoc />
     public ValueTask<Dek> GetDekByKeyIdAsync(Guid keyId, string scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -187,6 +202,30 @@ public sealed partial class DekManager(
         }
 
         return await LoadAndCacheAsync(active, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<Dek> GetDekByWrappedKeySlowAsync(
+        WrappedKey wrappedKey,
+        string cacheKey,
+        CancellationToken cancellationToken)
+    {
+        // Issue #6: unwrap once, cache by a SHA-256 hash of the wrapped ciphertext so the
+        // next decrypt that carries the same envelope WrappedKey hits the cache instead of
+        // round-tripping to the KEK provider (Vault / KMS / ...). The wrapped ciphertext
+        // itself is the tenant-specific secret material, so no additional scope partitioning
+        // is needed — see tasks/lessons.md L24.
+        byte[] dekBytes = await _keyProvider.UnwrapAsync(wrappedKey, cancellationToken).ConfigureAwait(false);
+        EnsureDekLength(dekBytes);
+
+        // KeyId on an envelope-unwrap is informational for diagnostics only — we synthesise
+        // an empty Guid here because the wrapped-key cache path does not go through the
+        // store and does not know the persisted KeyId. Callers that need the KeyId read it
+        // off EncryptedPayload directly.
+        Dek dek = new(dekBytes, Guid.Empty, wrappedKey);
+
+        CacheByWrappedKey(cacheKey, dek);
+        LogDekWrappedLoadedAndCached(_logger);
+        return CloneDek(dek);
     }
 
     private async Task<Dek> GetDekByKeyIdSlowAsync(Guid keyId, string scope, CancellationToken cancellationToken)
@@ -262,6 +301,20 @@ public sealed partial class DekManager(
         _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), dek, entryOptions);
     }
 
+    private void CacheByWrappedKey(string cacheKey, Dek dek)
+    {
+        if (_options.DekCacheTtl <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        MemoryCacheEntryOptions entryOptions = new()
+        {
+            AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
+        };
+        _cache.Set(cacheKey, dek, entryOptions);
+    }
+
     private void CacheByKeyId(string scope, Dek dek)
     {
         if (_options.DekCacheTtl <= TimeSpan.Zero)
@@ -284,6 +337,17 @@ public sealed partial class DekManager(
     // Scope is included in the cache key so that a compromised or buggy caller cannot use
     // another tenant's cached DEK by guessing its Guid.
     private static string BuildKeyIdCacheKey(Guid keyId, string scope) => $"vellum:dek:id:{scope}:{keyId}";
+
+    // Issue #6 / L24: the wrapped ciphertext IS the tenant-specific secret material, so its
+    // SHA-256 is a stable globally unique identifier safe to use as a cross-tenant cache key
+    // without an explicit scope partition. A consumer who does not already possess the
+    // wrapped ciphertext cannot guess another tenant's cache key.
+    private static string BuildWrappedCacheKey(WrappedKey wrappedKey)
+    {
+        byte[] ciphertextBytes = System.Text.Encoding.UTF8.GetBytes(wrappedKey.Ciphertext);
+        byte[] hash = SHA256.HashData(ciphertextBytes);
+        return $"vellum:dek:wrapped:{Convert.ToHexString(hash)}";
+    }
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "DEK cache hit for scope {Scope}")]
     private static partial void LogDekCacheHit(ILogger logger, string scope);
@@ -330,4 +394,12 @@ public sealed partial class DekManager(
         Level = LogLevel.Critical,
         Message = "DEK cache invariant violation: request for key {RequestedKeyId} on scope {Scope} resolved to cached entry with key {CachedKeyId}")]
     private static partial void LogDekCacheKeyIdMismatch(ILogger logger, Guid requestedKeyId, string scope, Guid cachedKeyId);
+
+    // Issue #6: wrapped-key decrypt cache. No scope field because the wrapped ciphertext
+    // hash is globally unique — see tasks/lessons.md L24.
+    [LoggerMessage(Level = LogLevel.Debug, Message = "DEK cache hit for wrapped-key decrypt path")]
+    private static partial void LogDekWrappedCacheHit(ILogger logger);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "DEK unwrapped via KEK provider and cached for wrapped-key decrypt path")]
+    private static partial void LogDekWrappedLoadedAndCached(ILogger logger);
 }

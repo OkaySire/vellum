@@ -29,7 +29,6 @@ namespace Vellum;
 /// </remarks>
 public sealed partial class PayloadEncryptor(
     IDekManager dekManager,
-    IKeyEncryptionProvider keyProvider,
     IRandomBytesProvider randomBytes,
     ILogger<PayloadEncryptor> logger) : IPayloadEncryptor
 {
@@ -38,7 +37,6 @@ public sealed partial class PayloadEncryptor(
     private const int DekSizeBytes = 32;
 
     private readonly IDekManager _dekManager = dekManager ?? throw new ArgumentNullException(nameof(dekManager));
-    private readonly IKeyEncryptionProvider _keyProvider = keyProvider ?? throw new ArgumentNullException(nameof(keyProvider));
     private readonly IRandomBytesProvider _randomBytes = randomBytes ?? throw new ArgumentNullException(nameof(randomBytes));
     private readonly ILogger<PayloadEncryptor> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
@@ -102,18 +100,22 @@ public sealed partial class PayloadEncryptor(
                 $"Ciphertext too short to contain a {TagSize}-byte authentication tag.");
         }
 
-        byte[] dekBytes = await _keyProvider.UnwrapAsync(payload.WrappedDek, cancellationToken).ConfigureAwait(false);
+        // Issue #6: route through IDekManager.GetDekByWrappedKeyAsync instead of calling
+        // IKeyEncryptionProvider.UnwrapAsync directly. The manager caches unwrapped DEKs
+        // keyed by a SHA-256 hash of the wrapped ciphertext so read-heavy workloads avoid
+        // a Vault / KMS round-trip on every decrypt. The cache-hit path is synchronous
+        // (ValueTask) and allocation-free aside from the required Dek clone.
+        Dek dek = await _dekManager.GetDekByWrappedKeyAsync(payload.WrappedDek, cancellationToken).ConfigureAwait(false);
         try
         {
-            // H-1: fail-closed if the KEK provider returned a key of unexpected length.
-            // AES-GCM accepts 16/24/32-byte keys; Vellum's contract is AES-256. A buggy or
-            // compromised provider returning a shorter key would silently downgrade the
-            // cipher strength. Rejecting here preserves the AES-256 invariant on the
-            // decrypt path in symmetry with DekManager.CreateDekAsync on the create path.
-            if (dekBytes.Length != DekSizeBytes)
+            // H-1 symmetry: the slow path in DekManager already enforces the AES-256 length
+            // contract on unwrap, but pin it again here so that a future refactor of the
+            // cache (or a cache-poisoning test asserting the fail-closed behaviour) cannot
+            // silently downgrade the cipher strength.
+            if (dek.Key.Length != DekSizeBytes)
             {
                 throw new CryptographicException(
-                    $"Unwrapped DEK has invalid length: expected {DekSizeBytes} bytes (AES-256), got {dekBytes.Length}.");
+                    $"Unwrapped DEK has invalid length: expected {DekSizeBytes} bytes (AES-256), got {dek.Key.Length}.");
             }
 
             int ciphertextLength = payload.Ciphertext.Length - TagSize;
@@ -122,7 +124,7 @@ public sealed partial class PayloadEncryptor(
 
             byte[] plaintext = new byte[ciphertextLength];
 
-            using (AesGcm aesGcm = new(dekBytes, TagSize))
+            using (AesGcm aesGcm = new(dek.Key, TagSize))
             {
                 aesGcm.Decrypt(payload.Nonce, ciphertext, tag, plaintext);
             }
@@ -132,7 +134,7 @@ public sealed partial class PayloadEncryptor(
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(dekBytes);
+            CryptographicOperations.ZeroMemory(dek.Key);
         }
     }
 

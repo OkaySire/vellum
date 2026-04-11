@@ -14,13 +14,17 @@ public sealed class PayloadEncryptorTests
     private const string Scope = "tenant:42";
 
     private static (PayloadEncryptor Encryptor, FakeKeyEncryptionProvider Provider, DekManager DekManager)
-        BuildSut()
+        BuildSut(TimeSpan? dekCacheTtl = null)
     {
         FakeKeyEncryptionProvider provider = new();
         FakeEncryptionKeyStore store = new();
         CountingRandomBytesProvider random = new();
         MemoryCache cache = new(new MemoryCacheOptions());
         VellumOptions options = new();
+        if (dekCacheTtl is not null)
+        {
+            options.DekCacheTtl = dekCacheTtl.Value;
+        }
 
         DekManager dekManager = new(
             provider,
@@ -33,7 +37,6 @@ public sealed class PayloadEncryptorTests
 
         PayloadEncryptor encryptor = new(
             dekManager,
-            provider,
             random,
             NullLogger<PayloadEncryptor>.Instance);
 
@@ -142,19 +145,76 @@ public sealed class PayloadEncryptorTests
     }
 
     [Fact]
-    public async Task Decrypt_SelfContained_DoesNotCallDekManager()
+    public async Task Decrypt_SelfContained_UsesOwnEnvelopeNotStoreLookup()
     {
-        // The envelope embeds its own WrappedKey, so decryption must go through the KEK
-        // provider only — never back to IDekManager / IEncryptionKeyStore. This pins the
-        // self-contained envelope contract (C3).
-        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut();
+        // Envelopes carry their own WrappedKey, so decryption goes through the
+        // IKeyEncryptionProvider via IDekManager.GetDekByWrappedKeyAsync — never back to
+        // IEncryptionKeyStore. This pins the self-contained envelope contract (C3).
+        (PayloadEncryptor encryptor, _, _) = BuildSut();
 
         byte[] plaintext = Encoding.UTF8.GetBytes("self contained");
         EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
 
+        byte[] decrypted = await encryptor.DecryptAsync(envelope);
+        decrypted.Should().Equal(plaintext);
+    }
+
+    [Fact]
+    public async Task DecryptAsync_CachesUnwrappedDek_OnSecondCall()
+    {
+        // Issue #6: two DecryptAsync calls on the same envelope must trigger exactly ONE
+        // IKeyEncryptionProvider.UnwrapAsync. The second call hits the wrapped-key cache.
+        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut(
+            dekCacheTtl: TimeSpan.FromMinutes(30));
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("cached decrypt payload");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
+
         int unwrapsBefore = provider.UnwrapCalls;
         _ = await encryptor.DecryptAsync(envelope);
-        provider.UnwrapCalls.Should().Be(unwrapsBefore + 1, "decrypt goes straight through the KEK provider");
+        _ = await encryptor.DecryptAsync(envelope);
+
+        provider.UnwrapCalls.Should().Be(unwrapsBefore + 1,
+            "the second decrypt must hit the wrapped-key cache and avoid a second KEK round-trip");
+    }
+
+    [Fact]
+    public async Task DecryptAsync_DifferentWrappedKeys_UnwrapBoth()
+    {
+        // Issue #6: the cache is keyed by the hash of the wrapped ciphertext, not by
+        // envelope identity. Two envelopes with DIFFERENT wrapped keys must each trigger
+        // their own Unwrap, even when produced by the same PayloadEncryptor.
+        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, DekManager dekManager) =
+            BuildSut(dekCacheTtl: TimeSpan.FromMinutes(30));
+
+        // First envelope under scope A — primes the cache for WrappedKey A.
+        EncryptedPayload envelopeA = await encryptor.EncryptAsync(
+            Encoding.UTF8.GetBytes("payload-a"),
+            scope: "tenant:a");
+        _ = await encryptor.DecryptAsync(envelopeA);
+
+        // Rotate the DEK for scope A so the next EncryptAsync produces a DIFFERENT
+        // WrappedKey (different ciphertext handle in the fake provider). This guarantees
+        // envelopeA.WrappedDek != envelopeB.WrappedDek even within the same scope.
+        await dekManager.RotateDekAsync(scope: "tenant:a");
+
+        EncryptedPayload envelopeB = await encryptor.EncryptAsync(
+            Encoding.UTF8.GetBytes("payload-b"),
+            scope: "tenant:a");
+
+        envelopeB.WrappedDek.Should().NotBe(envelopeA.WrappedDek,
+            "rotation must produce a fresh DEK and therefore a fresh wrapped ciphertext");
+
+        int unwrapsBefore = provider.UnwrapCalls;
+        _ = await encryptor.DecryptAsync(envelopeB);
+        provider.UnwrapCalls.Should().Be(unwrapsBefore + 1,
+            "a different wrapped key must miss the cache and trigger its own Unwrap");
+
+        // And decrypting envelopeA a second time should still be a cache hit.
+        int unwrapsAfter = provider.UnwrapCalls;
+        _ = await encryptor.DecryptAsync(envelopeA);
+        provider.UnwrapCalls.Should().Be(unwrapsAfter,
+            "envelopeA's wrapped key must still be cache-hot after envelopeB's decrypt");
     }
 
     [Fact]
@@ -173,8 +233,9 @@ public sealed class PayloadEncryptorTests
     {
         // H-1: pin the fail-closed behavior on the unwrap path. A buggy or compromised KEK
         // provider returning a 16-byte DEK must NOT silently downgrade the envelope to
-        // AES-128. PayloadEncryptor must reject the unwrapped key and throw before calling
-        // AesGcm.Decrypt.
+        // AES-128. The rejection fires inside IDekManager.GetDekByWrappedKeyAsync (which
+        // wraps the unwrap call and runs EnsureDekLength), so PayloadEncryptor sees the
+        // CryptographicException bubbling out of the decrypt cache's slow path.
         FakeKeyEncryptionProvider realProvider = new();
         FakeEncryptionKeyStore store = new();
         CountingRandomBytesProvider random = new();
@@ -192,19 +253,27 @@ public sealed class PayloadEncryptorTests
 
         PayloadEncryptor encryptor = new(
             dekManager,
-            realProvider,
             random,
             NullLogger<PayloadEncryptor>.Instance);
 
         byte[] plaintext = Encoding.UTF8.GetBytes("downgrade check");
         EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
 
-        // Now build a decrypt-side encryptor whose KEK provider returns 16 bytes instead
-        // of 32. Re-use the envelope minted above so everything else is legitimate.
+        // Rebuild a decrypt-only stack whose KEK provider returns 16 bytes instead of 32.
+        // The DekManager under test is fresh (no cache primed for envelope.WrappedDek), so
+        // the first DecryptAsync goes through the slow path and hits EnsureDekLength.
         ShortDekKeyEncryptionProvider shortProvider = new(dekBytesLength: 16);
-        PayloadEncryptor decryptOnly = new(
-            dekManager,
+        MemoryCache freshCache = new(new MemoryCacheOptions());
+        DekManager decryptDekManager = new(
             shortProvider,
+            store,
+            freshCache,
+            random,
+            TimeProvider.System,
+            Options.Create(options),
+            NullLogger<DekManager>.Instance);
+        PayloadEncryptor decryptOnly = new(
+            decryptDekManager,
             random,
             NullLogger<PayloadEncryptor>.Instance);
 
