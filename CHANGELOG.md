@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-preview.3] — 2026-04-11
+
+Targeted follow-up to `0.1.0-preview.2` that closes the single dogfood friction
+backend surfaced while trying to adopt the snake_case column-name overrides from
+`#8`. No new features, one issue closed, one attribute added.
+
+### Added
+
+- **#17 — `[VellumEntityFrameworkOptions]` attribute on the `DbContext` class.**
+  `dotnet ef migrations add` prefers an `IDesignTimeDbContextFactory<T>` over the
+  host-build path when both are available. A factory that only calls `UseNpgsql`
+  (or any other provider extension) without `UseVellum` ships `DbContextOptions`
+  that do not carry the Vellum options extension, and the scaffolder silently
+  falls back to Vellum defaults (PascalCase column names, SQL Server filter
+  syntax) even when the runtime `AddDbContext` pipeline is configured correctly.
+  `jacqcloud-buses` iteration 2 hit this while trying to rename the Vellum
+  columns to `snake_case` and had to defer the rename.
+
+  The fix is a declarative, per-`DbContext` source of options that is
+  reflection-readable at both runtime and design time: decorate the context class
+  with `[VellumEntityFrameworkOptions(TableName = "…", KeyIdColumnName = "…", …)]`
+  and `VellumModelBuilderExtensions.ResolveOptions` picks the attribute up as
+  priority 2 (between the explicit `UseVellum` extension and the
+  `IOptions<VellumEntityFrameworkOptions>` application-services fallback). Every
+  attribute property the consumer leaves unset keeps the built-in default, so a
+  minimal decoration like `[VellumEntityFrameworkOptions(TableName =
+  "bus_encryption_keys")]` is valid.
+
+  An `IDesignTimeDbContextFactory<T>` that calls `UseVellum` explicitly still
+  works; the attribute is the recommended path when the schema is fixed at
+  compile time and the consumer wants a single source of truth. See
+  `README.md#design-time-scaffolder-dotnet-ef-migrations-add` for the full
+  pattern.
+
+### Tests
+
+161 → 163 tests (net10.0 run), all green. Per-project breakdown:
+`Abstractions 7`, `Core 38`, `EntityFrameworkCore 29` (+2),
+`Static 24`, `InMemory 30`, `Vault 35`.
+
+### Notes
+
+- Audit posture unchanged: 0 critical / 0 high / 0 medium / 0 low open.
+- CodeQL posture unchanged: 0 open alerts.
+- No breaking changes. Existing `UseVellum`, `AddEntityFrameworkCoreStore<T>`,
+  and `AddVellumEncryptionKeys(this)` call sites keep working unchanged — the
+  attribute is strictly additive and slots in between the existing priority
+  levels.
+
 ## [0.1.0-preview.2] — 2026-04-11
 
 Feedback release driven by the `jacqcloud-buses` Phase 2 dogfood. Backend migrated
@@ -122,6 +171,7 @@ First public preview published to nuget.org. Phase 1 scaffold + `Vellum.Abstract
 - 150 tests green on net10.0 (compile-only on net8.0 / net9.0).
 - Audit remediation: 3 High, 7 Medium, 9 Low actionable findings fixed.
 
-[Unreleased]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.2...HEAD
+[Unreleased]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.3...HEAD
+[0.1.0-preview.3]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.2...v0.1.0-preview.3
 [0.1.0-preview.2]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.1...v0.1.0-preview.2
 [0.1.0-preview.1]: https://github.com/OkaySire/vellum/releases/tag/v0.1.0-preview.1
