@@ -61,4 +61,46 @@ public sealed class VellumEntityFrameworkDesignTimeAttributeTests
         IIndex uniqueIndex = entity.GetIndexes().Single(index => index.IsUnique);
         uniqueIndex.GetFilter().Should().Be("\"is_active\" = 1");
     }
+
+    [Fact]
+    public void Model_UseVellumOverridesAttribute_WhenBothPresent()
+    {
+        // Priority contract: UseVellum on the options builder (explicit, per-builder) wins
+        // over the attribute (type-level declaration). Consumers who need to override the
+        // attribute-declared schema for a specific options instance can still do so via
+        // UseVellum without editing the attribute.
+        using SqliteConnection connection = new("DataSource=:memory:");
+        connection.Open();
+
+        DbContextOptions<AttributeDecoratedTestDbContext> dbOptions =
+            new DbContextOptionsBuilder<AttributeDecoratedTestDbContext>()
+                .UseSqlite(connection)
+                .UseVellum(opts =>
+                {
+                    opts.TableName = "override_keys";
+                    opts.KeyIdColumnName = "override_key_id";
+                    opts.UniqueActiveIndexFilter = "\"is_active\" = 1";
+                })
+                .Options;
+
+        using AttributeDecoratedTestDbContext context = new(dbOptions);
+        IEntityType entity = context.Model.FindEntityType(typeof(EncryptionKeyRecord))!;
+
+        entity.GetTableName().Should().Be("override_keys");
+
+        StoreObjectIdentifier storeObject = StoreObjectIdentifier.Table(
+            entity.GetTableName()!,
+            entity.GetSchema());
+
+        entity.FindProperty(nameof(EncryptionKeyRecord.KeyId))!
+            .GetColumnName(storeObject).Should().Be("override_key_id");
+
+        // Properties UseVellum left unset fall back to VellumEntityFrameworkOptions
+        // defaults, NOT the attribute values — UseVellum produces a complete options
+        // instance, and Priority 1 returns it verbatim without merging with Priority 2.
+        // This is the same semantics the snake_case/default-column tests already pin
+        // for the UseVellum path.
+        entity.FindProperty(nameof(EncryptionKeyRecord.Scope))!
+            .GetColumnName(storeObject).Should().Be("Scope");
+    }
 }

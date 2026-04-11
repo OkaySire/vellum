@@ -1,3 +1,4 @@
+using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
@@ -30,6 +31,15 @@ namespace Vellum.EntityFrameworkCore;
 ///     <see cref="VellumDbContextOptionsBuilderExtensions.UseVellum(DbContextOptionsBuilder, Action{VellumEntityFrameworkOptions}?)"/>
 ///     on the <see cref="DbContextOptionsBuilder"/> (highest priority — explicit
 ///     per-context configuration).
+///   </description></item>
+///   <item><description>
+///     <see cref="VellumEntityFrameworkOptionsAttribute"/> declared on the
+///     <see cref="DbContext"/> CLR type. Reflection-readable at both runtime and design
+///     time, which is the whole point: it lets
+///     <see cref="Microsoft.EntityFrameworkCore.Design.IDesignTimeDbContextFactory{TContext}"/>
+///     implementations omit <c>UseVellum</c> and still produce migrations that match the
+///     runtime schema (issue #17). Every property that is left unset on the attribute
+///     keeps the Vellum default.
 ///   </description></item>
 ///   <item><description>
 ///     <see cref="IOptions{TOptions}"/> from the application service provider, as
@@ -109,7 +119,17 @@ public static class VellumModelBuilderExtensions
             return contextExtension.Options;
         }
 
-        // Priority 2: IOptions<T> from the application service provider (populated by
+        // Priority 2: [VellumEntityFrameworkOptions] attribute on the DbContext type.
+        // Reflection-readable at both runtime and design time, which is what makes this
+        // source survive an IDesignTimeDbContextFactory<T> that omits UseVellum (issue #17).
+        VellumEntityFrameworkOptionsAttribute? attribute = context.GetType()
+            .GetCustomAttribute<VellumEntityFrameworkOptionsAttribute>(inherit: false);
+        if (attribute is not null)
+        {
+            return BuildFromAttribute(attribute);
+        }
+
+        // Priority 3: IOptions<T> from the application service provider (populated by
         // AddEntityFrameworkCoreStore when the context is built through AddDbContext<T>).
         CoreOptionsExtension? core = dbContextOptions.FindExtension<CoreOptionsExtension>();
         IServiceProvider? appServices = core?.ApplicationServiceProvider;
@@ -121,10 +141,80 @@ public static class VellumModelBuilderExtensions
             return fromDi;
         }
 
-        // Priority 3: defaults. Consumers who hit this path without also calling UseVellum
+        // Priority 4: defaults. Consumers who hit this path without UseVellum, an attribute,
         // or AddEntityFrameworkCoreStore get the out-of-the-box PascalCase / SQL-Server
         // shape — same result as passing `new VellumEntityFrameworkOptions()` explicitly.
         return new VellumEntityFrameworkOptions();
+    }
+
+    private static VellumEntityFrameworkOptions BuildFromAttribute(VellumEntityFrameworkOptionsAttribute attribute)
+    {
+        // Start from defaults so every property the attribute leaves unset keeps the
+        // built-in value. Consumers can decorate the DbContext with a minimal attribute
+        // (for example only TableName) without being forced to repeat every column name.
+        VellumEntityFrameworkOptions options = new();
+
+        if (attribute.TableName is not null)
+        {
+            options.TableName = attribute.TableName;
+        }
+
+        if (attribute.SchemaName is not null)
+        {
+            options.SchemaName = attribute.SchemaName;
+        }
+
+        if (attribute.UniqueActiveIndexFilter is not null)
+        {
+            options.UniqueActiveIndexFilter = attribute.UniqueActiveIndexFilter;
+        }
+
+        if (attribute.ScopeMaxLength > 0)
+        {
+            options.ScopeMaxLength = attribute.ScopeMaxLength;
+        }
+
+        if (attribute.WrappedProviderVersionMaxLength > 0)
+        {
+            options.WrappedProviderVersionMaxLength = attribute.WrappedProviderVersionMaxLength;
+        }
+
+        if (attribute.KeyIdColumnName is not null)
+        {
+            options.KeyIdColumnName = attribute.KeyIdColumnName;
+        }
+
+        if (attribute.ScopeColumnName is not null)
+        {
+            options.ScopeColumnName = attribute.ScopeColumnName;
+        }
+
+        if (attribute.WrappedCiphertextColumnName is not null)
+        {
+            options.WrappedCiphertextColumnName = attribute.WrappedCiphertextColumnName;
+        }
+
+        if (attribute.WrappedProviderVersionColumnName is not null)
+        {
+            options.WrappedProviderVersionColumnName = attribute.WrappedProviderVersionColumnName;
+        }
+
+        if (attribute.CreatedAtColumnName is not null)
+        {
+            options.CreatedAtColumnName = attribute.CreatedAtColumnName;
+        }
+
+        if (attribute.ExpiresAtColumnName is not null)
+        {
+            options.ExpiresAtColumnName = attribute.ExpiresAtColumnName;
+        }
+
+        if (attribute.IsActiveColumnName is not null)
+        {
+            options.IsActiveColumnName = attribute.IsActiveColumnName;
+        }
+
+        return options;
     }
 
     private static void Configure(
