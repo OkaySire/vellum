@@ -21,14 +21,18 @@ public sealed class TestHarness : IAsyncDisposable
 {
     private readonly string _databasePath;
     private readonly string _connectionString;
+    private readonly Action<VellumEntityFrameworkOptions> _configureVellum;
     private readonly List<TestDbContext> _contexts = new();
 
-    public TestHarness(VellumEntityFrameworkOptions? vellumOptions = null)
+    public TestHarness(Action<VellumEntityFrameworkOptions>? configureVellum = null)
     {
-        TestOptionsAccessor.Current = vellumOptions ?? new VellumEntityFrameworkOptions
+        // Default options target SQLite-compatible filter syntax since all tests run on
+        // in-memory SQLite. Callers that need to exercise a different table shape can pass
+        // their own configure delegate.
+        _configureVellum = configureVellum ?? (static options =>
         {
-            UniqueActiveIndexFilter = "\"IsActive\" = 1",
-        };
+            options.UniqueActiveIndexFilter = "\"IsActive\" = 1";
+        });
 
         // Temp-file SQLite: all contexts opened against the same path share the database
         // and each gets its own connection — which sidesteps both the "active statements"
@@ -60,6 +64,7 @@ public sealed class TestHarness : IAsyncDisposable
     {
         DbContextOptions<TestDbContext> options = new DbContextOptionsBuilder<TestDbContext>()
             .UseSqlite(_connectionString)
+            .UseVellum(_configureVellum)
             .Options;
 
         TestDbContext context = new TestDbContext(options);

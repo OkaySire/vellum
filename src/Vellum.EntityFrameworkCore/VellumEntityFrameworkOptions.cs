@@ -5,10 +5,17 @@ namespace Vellum.EntityFrameworkCore;
 /// </summary>
 /// <remarks>
 /// <para>
-/// These options configure the storage layout (table name, schema, column length) and the
-/// SQL fragment used by the filtered unique index that enforces the "one active key per
-/// scope" invariant. They must be set before the consumer's <c>DbContext.OnModelCreating</c>
-/// calls <c>VellumModelBuilderExtensions.AddVellumEncryptionKeys</c>.
+/// These options configure the storage layout (table name, schema, column names, column
+/// length) and the SQL fragment used by the filtered unique index that enforces the
+/// "one active key per scope" invariant.
+/// </para>
+/// <para>
+/// <b>Where to configure.</b> Call <c>UseVellum</c> on the same <c>DbContextOptionsBuilder</c>
+/// you pass to <c>AddDbContext&lt;T&gt;</c>, and/or pass a configure delegate to
+/// <c>AddEntityFrameworkCoreStore&lt;T&gt;</c>. Inside <c>DbContext.OnModelCreating</c>, call
+/// <c>modelBuilder.AddVellumEncryptionKeys(this)</c>; the extension reads the options back
+/// from the context (first via <c>UseVellum</c>, then via <c>IOptions&lt;VellumEntityFrameworkOptions&gt;</c>
+/// on the application service provider) so the consumer never has to pass them twice.
 /// </para>
 /// <para>
 /// <b>Filtered unique index portability.</b> The core contract of this package is that
@@ -28,6 +35,14 @@ namespace Vellum.EntityFrameworkCore;
 /// The default targets SQL Server because it is the most common .NET corporate stack.
 /// Consumers running any other provider <b>must</b> override
 /// <see cref="UniqueActiveIndexFilter"/> in their registration call.
+/// </para>
+/// <para>
+/// <b>Column name overrides (issue #8).</b> Consumers integrating with an existing
+/// snake_case schema can rename every column via the dedicated
+/// <c>*ColumnName</c> properties. When a column is renamed, the consumer is also
+/// responsible for keeping <see cref="UniqueActiveIndexFilter"/> in sync — the filter is
+/// a raw SQL fragment that references the <c>IsActive</c> column by name, so renaming
+/// <see cref="IsActiveColumnName"/> typically requires updating the filter to match.
 /// </para>
 /// </remarks>
 public sealed class VellumEntityFrameworkOptions
@@ -51,7 +66,8 @@ public sealed class VellumEntityFrameworkOptions
     /// </summary>
     /// <remarks>
     /// See the type-level remarks on <see cref="VellumEntityFrameworkOptions"/> for the
-    /// per-provider syntax.
+    /// per-provider syntax. If you rename <see cref="IsActiveColumnName"/>, update this
+    /// filter to reference the new column name.
     /// </remarks>
     public string UniqueActiveIndexFilter { get; set; } = "[IsActive] = 1";
 
@@ -77,4 +93,54 @@ public sealed class VellumEntityFrameworkOptions
     /// </para>
     /// </remarks>
     public int WrappedProviderVersionMaxLength { get; set; } = 512;
+
+    /// <summary>
+    /// Gets or sets the column name for the DEK identifier. Defaults to <c>KeyId</c>.
+    /// Override to match an existing snake_case schema (e.g. <c>key_id</c>).
+    /// </summary>
+    public string KeyIdColumnName { get; set; } = "KeyId";
+
+    /// <summary>
+    /// Gets or sets the column name for the opaque scope identifier. Defaults to <c>Scope</c>.
+    /// Override to match an existing snake_case schema (e.g. <c>scope</c>).
+    /// </summary>
+    public string ScopeColumnName { get; set; } = "Scope";
+
+    /// <summary>
+    /// Gets or sets the column name for the wrapped DEK ciphertext. Defaults to
+    /// <c>WrappedCiphertext</c>. Override to match an existing snake_case schema
+    /// (e.g. <c>wrapped_ciphertext</c>).
+    /// </summary>
+    public string WrappedCiphertextColumnName { get; set; } = "WrappedCiphertext";
+
+    /// <summary>
+    /// Gets or sets the column name for the KEK provider version. Defaults to
+    /// <c>WrappedProviderVersion</c>. Override to match an existing snake_case schema
+    /// (e.g. <c>wrapped_provider_version</c>).
+    /// </summary>
+    public string WrappedProviderVersionColumnName { get; set; } = "WrappedProviderVersion";
+
+    /// <summary>
+    /// Gets or sets the column name for the creation timestamp. Defaults to <c>CreatedAt</c>.
+    /// Override to match an existing snake_case schema (e.g. <c>created_at</c>).
+    /// </summary>
+    public string CreatedAtColumnName { get; set; } = "CreatedAt";
+
+    /// <summary>
+    /// Gets or sets the column name for the optional expiry timestamp. Defaults to
+    /// <c>ExpiresAt</c>. Override to match an existing snake_case schema
+    /// (e.g. <c>expires_at</c>).
+    /// </summary>
+    public string ExpiresAtColumnName { get; set; } = "ExpiresAt";
+
+    /// <summary>
+    /// Gets or sets the column name for the active flag. Defaults to <c>IsActive</c>.
+    /// </summary>
+    /// <remarks>
+    /// When renaming this column, update <see cref="UniqueActiveIndexFilter"/> in lockstep
+    /// so the filtered unique index references the new column name. For example, renaming
+    /// <see cref="IsActiveColumnName"/> to <c>is_active</c> on PostgreSQL requires changing
+    /// <see cref="UniqueActiveIndexFilter"/> to <c>"is_active" = true</c>.
+    /// </remarks>
+    public string IsActiveColumnName { get; set; } = "IsActive";
 }
