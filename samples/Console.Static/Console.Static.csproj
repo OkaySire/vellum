@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Vellum.Samples.ConsoleStatic</RootNamespace>
+    <AssemblyName>Vellum.Samples.ConsoleStatic</AssemblyName>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <AnalysisMode>Default</AnalysisMode>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Vellum.Abstractions\Vellum.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Vellum.Core\Vellum.Core.csproj" />
+    <ProjectReference Include="..\..\src\Vellum.Static\Vellum.Static.csproj" />
+    <ProjectReference Include="..\..\src\Vellum.InMemory\Vellum.InMemory.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+  </ItemGroup>
+
+</Project>
