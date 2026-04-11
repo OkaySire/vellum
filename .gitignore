@@ -54,6 +54,11 @@ $RECYCLE.BIN/
 CLAUDE.md
 tasks/
 
+# DocFX build output
+docs/_site/
+docs/api/
+docs/obj/
+
 # Secrets
 **/appsettings.Development.json
 **/appsettings.Local.json

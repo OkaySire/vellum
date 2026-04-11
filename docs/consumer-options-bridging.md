@@ -11,7 +11,7 @@ Vellum's DI extensions take `Action<TOptions>` delegates:
 services.AddVellum(opts => { opts.DekCacheTtl = TimeSpan.FromMinutes(30); });
 services.AddVaultProvider(opts =>
 {
-    opts.Address = new Uri("http://vault.example:8200");
+    opts.Address = "http://vault.example:8200";
     opts.Token = "s.XXXX";
     opts.KeyName = "my-kek";
 });
@@ -41,7 +41,7 @@ obvious-looking code:
 ```csharp
 // ❌ Broken — EncryptionOptions isn't bound yet at registration time.
 EncryptionOptions enc = configuration.GetSection("Encryption").Get<EncryptionOptions>();
-services.AddVaultProvider(v => { v.Address = new Uri(enc.VaultAddress); });
+services.AddVaultProvider(v => { v.Address = enc.VaultAddress; });
 ```
 
 And you definitely shouldn't do this:
@@ -52,7 +52,7 @@ services.AddVaultProvider(v =>
 {
     IOptions<EncryptionOptions> opts =
         services.BuildServiceProvider().GetRequiredService<IOptions<EncryptionOptions>>();
-    v.Address = new Uri(opts.Value.VaultAddress);
+    v.Address = opts.Value.VaultAddress;
 });
 ```
 
@@ -86,7 +86,7 @@ services.AddOptions<VellumOptions>()
 services.AddOptions<VaultOptions>()
     .Configure<IOptions<EncryptionOptions>>((vault, consumer) =>
     {
-        vault.Address = new Uri(consumer.Value.VaultAddress);
+        vault.Address = consumer.Value.VaultAddress;
         vault.Token   = consumer.Value.VaultToken;
         vault.KeyName = consumer.Value.KeyName;
     });
