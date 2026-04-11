@@ -22,6 +22,9 @@
     <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="9.0.9" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.9" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.9" />
+    <!-- Samples only (samples/AspNetCore.Postgres.Vault). Not referenced by any
+         production package — Vellum.EntityFrameworkCore stays provider-agnostic. -->
+    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />
   </ItemGroup>
 
   <ItemGroup Label="Source link">

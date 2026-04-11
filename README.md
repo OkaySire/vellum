@@ -41,7 +41,55 @@ This pattern lets you rotate keys at the KEK level without re-encrypting every p
 
 ## Quickstart
 
-_(coming soon — Phase 1 in progress)_
+Install the packages (preview — mark `--prerelease`):
+
+```bash
+dotnet add package Vellum.Abstractions       --prerelease
+dotnet add package Vellum.Core                --prerelease
+dotnet add package Vellum.Vault               --prerelease
+dotnet add package Vellum.EntityFrameworkCore --prerelease
+```
+
+Wire Vellum into an ASP.NET Core / generic host app. Options for the EF Core store
+flow via `UseVellum` on the `DbContextOptionsBuilder` — configure them once, no duplication:
+
+```csharp
+// Program.cs
+services.AddVellum(o => o.DekCacheTtl = TimeSpan.FromMinutes(30));
+services.AddVaultProvider(o =>
+{
+    o.Address = "http://vault:8200";
+    o.Token   = builder.Configuration["Vault:Token"]!;
+    o.KeyName = "my-kek";
+});
+services.AddDbContext<AppDbContext>(options => options
+    .UseNpgsql(builder.Configuration.GetConnectionString("App"))
+    .UseVellum(v => v.UniqueActiveIndexFilter = "\"IsActive\" = true"));
+services.AddEntityFrameworkCoreStore<AppDbContext>();
+
+// AppDbContext.cs
+public sealed class AppDbContext(DbContextOptions<AppDbContext> opts) : DbContext(opts)
+{
+    protected override void OnModelCreating(ModelBuilder mb)
+    {
+        base.OnModelCreating(mb);
+        mb.AddVellumEncryptionKeys(this);
+    }
+}
+
+// Usage (inject IPayloadEncryptor anywhere)
+EncryptedPayload envelope = await encryptor.EncryptStringAsync("hello", scope: "tenant:42");
+string roundtrip          = await encryptor.DecryptStringAsync(envelope);
+```
+
+The envelope carries its own wrapped DEK, so decryption is self-contained — no second
+DB round-trip. Since 0.1.0-preview.2, `DecryptAsync` is also backed by an in-memory
+cache keyed by the wrapped ciphertext (see [#6](https://github.com/OkaySire/vellum/issues/6)),
+so read-heavy workloads pay at most one KEK round-trip per distinct DEK.
+
+For more complete wiring — feature-flagged rollouts, snake_case schemas, migrations
+from a legacy encryption layer, `appsettings.json` bridging — see the
+[`samples/`](samples/) folder and [`docs/consumer-options-bridging.md`](docs/consumer-options-bridging.md).
 
 ## Building locally
 

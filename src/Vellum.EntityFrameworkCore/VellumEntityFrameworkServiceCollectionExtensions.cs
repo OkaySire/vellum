@@ -14,8 +14,8 @@ public static class VellumEntityFrameworkServiceCollectionExtensions
     /// <summary>
     /// Registers the Entity Framework Core-backed <see cref="IEncryptionKeyStore"/> using the
     /// consumer's <typeparamref name="TContext"/> as the transport. The consumer must also call
-    /// <see cref="VellumModelBuilderExtensions.AddVellumEncryptionKeys"/> in
-    /// <c>TContext.OnModelCreating</c> so that EF Core knows about the wrapped-DEK table.
+    /// <c>modelBuilder.AddVellumEncryptionKeys(this)</c> in <c>TContext.OnModelCreating</c>
+    /// so that EF Core knows about the wrapped-DEK table.
     /// </summary>
     /// <typeparam name="TContext">The consumer's <see cref="DbContext"/> subclass.</typeparam>
     /// <param name="services">The service collection to configure.</param>

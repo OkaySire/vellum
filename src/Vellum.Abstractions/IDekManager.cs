@@ -80,4 +80,39 @@ public interface IDekManager
     /// <returns>The plaintext DEK. Callers own the <see cref="Dek.Key"/> array and should zero it out after use.</returns>
     /// <exception cref="System.InvalidOperationException">Thrown when the key does not exist or when the key's persisted scope does not match <paramref name="scope"/>.</exception>
     public ValueTask<Dek> GetDekByKeyIdAsync(Guid keyId, string scope, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns the plaintext DEK for a <see cref="WrappedKey"/> pulled straight from a
+    /// self-contained <see cref="EncryptedPayload"/>, caching the unwrapped result so that
+    /// read-heavy workloads do not pay a KEK round-trip on every decrypt.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Self-contained envelopes still need a decrypt cache.</b>
+    /// <see cref="IPayloadEncryptor.DecryptAsync"/> reads <see cref="WrappedKey"/> off the
+    /// envelope itself — no store round-trip — but a naive implementation would still call
+    /// <see cref="IKeyEncryptionProvider.UnwrapAsync"/> for every decrypt, turning the KEK
+    /// provider (Vault, AWS KMS, Azure Key Vault, ...) into a per-message latency source.
+    /// This method caches the unwrapped plaintext DEK keyed by a SHA-256 hash of
+    /// <see cref="WrappedKey.Ciphertext"/> so the fast path is a single cache lookup.
+    /// </para>
+    /// <para>
+    /// <b>Cache safety — why no scope is required.</b> The cache key derives from the wrapped
+    /// ciphertext itself, which IS the tenant-specific secret material. Two different tenants
+    /// wrapping the same plaintext DEK against the same KEK produce different ciphertexts
+    /// (the wrap operation is authenticated and includes a random IV), so a hash of the
+    /// ciphertext is a globally unique tenant-safe identifier. A consumer who does not
+    /// already possess a wrapped ciphertext cannot guess another tenant's cache key. See
+    /// <c>tasks/lessons.md</c> L24 for the full analysis and its relationship with L15
+    /// (which governs cache-by-opaque-identifier partitioning).
+    /// </para>
+    /// <para>
+    /// Cache-hit-is-sync: implementations should return a completed <see cref="ValueTask{TResult}"/>
+    /// when the DEK for <paramref name="wrappedKey"/> is already cached.
+    /// </para>
+    /// </remarks>
+    /// <param name="wrappedKey">The wrapped DEK — typically <see cref="EncryptedPayload.WrappedDek"/>.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The plaintext DEK. Callers own the <see cref="Dek.Key"/> array and should zero it out after use.</returns>
+    public ValueTask<Dek> GetDekByWrappedKeyAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default);
 }

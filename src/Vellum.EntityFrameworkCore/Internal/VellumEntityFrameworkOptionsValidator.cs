@@ -46,8 +46,47 @@ internal sealed class VellumEntityFrameworkOptionsValidator : IValidateOptions<V
                 $"{nameof(VellumEntityFrameworkOptions.UniqueActiveIndexFilter)} must be a non-empty SQL fragment. See the XML remarks on VellumEntityFrameworkOptions for per-provider syntax.");
         }
 
+        // Column name overrides (issue #8). Empty/whitespace values would produce silent
+        // migration corruption, so we treat them as fatal misconfiguration.
+        ValidateColumnName(
+            failures,
+            nameof(VellumEntityFrameworkOptions.KeyIdColumnName),
+            options.KeyIdColumnName);
+        ValidateColumnName(
+            failures,
+            nameof(VellumEntityFrameworkOptions.ScopeColumnName),
+            options.ScopeColumnName);
+        ValidateColumnName(
+            failures,
+            nameof(VellumEntityFrameworkOptions.WrappedCiphertextColumnName),
+            options.WrappedCiphertextColumnName);
+        ValidateColumnName(
+            failures,
+            nameof(VellumEntityFrameworkOptions.WrappedProviderVersionColumnName),
+            options.WrappedProviderVersionColumnName);
+        ValidateColumnName(
+            failures,
+            nameof(VellumEntityFrameworkOptions.CreatedAtColumnName),
+            options.CreatedAtColumnName);
+        ValidateColumnName(
+            failures,
+            nameof(VellumEntityFrameworkOptions.ExpiresAtColumnName),
+            options.ExpiresAtColumnName);
+        ValidateColumnName(
+            failures,
+            nameof(VellumEntityFrameworkOptions.IsActiveColumnName),
+            options.IsActiveColumnName);
+
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);
+    }
+
+    private static void ValidateColumnName(List<string> failures, string propertyName, string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            failures.Add($"{propertyName} must be a non-empty identifier.");
+        }
     }
 }

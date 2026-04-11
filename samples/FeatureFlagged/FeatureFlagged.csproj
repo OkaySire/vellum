@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Vellum.Samples.FeatureFlagged</RootNamespace>
+    <AssemblyName>Vellum.Samples.FeatureFlagged</AssemblyName>
+    <!--
+      Samples are illustrative, not shipped. They opt out of TreatWarningsAsErrors
+      and the strict analyzer ruleset that the production projects enforce so the
+      focus stays on the pattern being demonstrated.
+    -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <AnalysisMode>Default</AnalysisMode>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Vellum.Abstractions\Vellum.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Vellum.Core\Vellum.Core.csproj" />
+    <ProjectReference Include="..\..\src\Vellum.Static\Vellum.Static.csproj" />
+    <ProjectReference Include="..\..\src\Vellum.InMemory\Vellum.InMemory.csproj" />
+  </ItemGroup>
+
+</Project>

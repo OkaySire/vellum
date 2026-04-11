@@ -363,6 +363,137 @@ public sealed class DekManagerTests
             .WithMessage("*expected 32 bytes*");
     }
 
+    [Fact]
+    public async Task GetDekByWrappedKeyAsync_CacheMiss_CallsUnwrapAndCaches()
+    {
+        // Issue #6: first call on a fresh wrapped key goes through the provider; second
+        // call on the same wrapped key hits the cache and does NOT call Unwrap again.
+        DekManager sut = BuildSut(
+            out FakeKeyEncryptionProvider provider,
+            out _,
+            out _,
+            out _,
+            dekCacheTtl: TimeSpan.FromMinutes(30));
+
+        byte[] plaintext = new byte[32];
+        for (int i = 0; i < plaintext.Length; i++)
+        {
+            plaintext[i] = (byte)(i ^ 0x5A);
+        }
+        WrappedKey wrapped = await provider.WrapAsync(plaintext);
+
+        int unwrapsBefore = provider.UnwrapCalls;
+        Dek first = await sut.GetDekByWrappedKeyAsync(wrapped);
+        Dek second = await sut.GetDekByWrappedKeyAsync(wrapped);
+
+        first.Key.Should().Equal(plaintext);
+        second.Key.Should().Equal(plaintext);
+        provider.UnwrapCalls.Should().Be(unwrapsBefore + 1,
+            "the second call must be served from the wrapped-key cache");
+    }
+
+    [Fact]
+    public async Task GetDekByWrappedKeyAsync_CacheHit_ReturnsClonedCopy()
+    {
+        // L-3 preservation: the cache entry is cloned before being handed back so the
+        // caller can zero its copy without corrupting the cache.
+        DekManager sut = BuildSut(
+            out FakeKeyEncryptionProvider provider,
+            out _,
+            out _,
+            out _,
+            dekCacheTtl: TimeSpan.FromMinutes(30));
+
+        byte[] plaintext = new byte[32];
+        plaintext[0] = 0xAB;
+        WrappedKey wrapped = await provider.WrapAsync(plaintext);
+
+        Dek first = await sut.GetDekByWrappedKeyAsync(wrapped);
+        Array.Clear(first.Key); // caller zeroes their copy
+
+        Dek second = await sut.GetDekByWrappedKeyAsync(wrapped);
+        second.Key[0].Should().Be(0xAB, "the cached copy must be unaffected by the caller's zeroing");
+        ReferenceEquals(first.Key, second.Key).Should().BeFalse("each call must return a cloned byte[]");
+    }
+
+    [Fact]
+    public async Task GetDekByWrappedKeyAsync_DifferentWrappedKeys_ProducesDifferentCacheKeys()
+    {
+        // Issue #6 / L24: two different wrapped ciphertexts must produce two different
+        // cache keys — the hash of the wrapped ciphertext is globally unique, no scope
+        // partitioning needed. Prime the cache with one wrapped key, then prove the
+        // second wrapped key MISSES the cache (its Unwrap actually runs).
+        DekManager sut = BuildSut(
+            out FakeKeyEncryptionProvider provider,
+            out _,
+            out _,
+            out _,
+            dekCacheTtl: TimeSpan.FromMinutes(30));
+
+        byte[] plaintextA = new byte[32];
+        plaintextA[0] = 0x01;
+        WrappedKey wrappedA = await provider.WrapAsync(plaintextA);
+
+        byte[] plaintextB = new byte[32];
+        plaintextB[0] = 0x02;
+        WrappedKey wrappedB = await provider.WrapAsync(plaintextB);
+
+        wrappedA.Should().NotBe(wrappedB, "each Wrap call should produce a fresh ciphertext handle");
+
+        // Prime wrappedA.
+        _ = await sut.GetDekByWrappedKeyAsync(wrappedA);
+        int unwrapsAfterA = provider.UnwrapCalls;
+
+        // Ask for wrappedB — must NOT hit A's cache entry.
+        Dek dekB = await sut.GetDekByWrappedKeyAsync(wrappedB);
+
+        dekB.Key.Should().Equal(plaintextB);
+        provider.UnwrapCalls.Should().Be(unwrapsAfterA + 1,
+            "wrappedB must miss the cache and run its own Unwrap");
+
+        // And verify wrappedA is still cached.
+        int unwrapsAfterB = provider.UnwrapCalls;
+        _ = await sut.GetDekByWrappedKeyAsync(wrappedA);
+        provider.UnwrapCalls.Should().Be(unwrapsAfterB, "wrappedA's entry must still be cache-hot");
+    }
+
+    [Fact]
+    public async Task GetDekByWrappedKeyAsync_NullWrappedKey_Throws()
+    {
+        DekManager sut = BuildSut(out _, out _, out _, out _);
+
+        Func<Task> act = async () => await sut.GetDekByWrappedKeyAsync(null!);
+
+        await act.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    [Fact]
+    public async Task GetDekByWrappedKeyAsync_ProviderReturnsShortDek_FailsClosed()
+    {
+        // H-1 symmetry: the wrapped-key slow path must also reject unwrapped DEKs of the
+        // wrong length. Buggy KEK providers must not downgrade the AES-256 contract.
+        ShortDekProvider shortProvider = new(dekBytesLength: 16);
+        FakeEncryptionKeyStore store = new();
+        CountingRandomBytesProvider random = new();
+        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumOptions options = new();
+
+        DekManager sut = new(
+            shortProvider,
+            store,
+            cache,
+            random,
+            TimeProvider.System,
+            Options.Create(options),
+            NullLogger<DekManager>.Instance);
+
+        WrappedKey wrapped = new("short:v1", "v1");
+
+        Func<Task> act = async () => await sut.GetDekByWrappedKeyAsync(wrapped);
+        await act.Should().ThrowAsync<CryptographicException>()
+            .WithMessage("*expected 32 bytes*");
+    }
+
     private sealed class ShortDekProvider(int dekBytesLength) : IKeyEncryptionProvider
     {
         public string ProviderName => "short-fake";
