@@ -1,0 +1,93 @@
+{
+  "$schema": "https://raw.githubusercontent.com/dotnet/docfx/main/schemas/docfx.schema.json",
+  "metadata": [
+    {
+      "src": [
+        {
+          "src": "../src",
+          "files": [
+            "Vellum.Abstractions/Vellum.Abstractions.csproj",
+            "Vellum.Core/Vellum.Core.csproj",
+            "Vellum.Vault/Vellum.Vault.csproj",
+            "Vellum.Static/Vellum.Static.csproj",
+            "Vellum.InMemory/Vellum.InMemory.csproj",
+            "Vellum.EntityFrameworkCore/Vellum.EntityFrameworkCore.csproj"
+          ]
+        }
+      ],
+      "dest": "api",
+      "includePrivateMembers": false,
+      "disableGitFeatures": false,
+      "disableDefaultFilter": false,
+      "noRestore": false,
+      "namespaceLayout": "flattened",
+      "memberLayout": "samePage",
+      "allowCompilationErrors": false,
+      "properties": {
+        "TargetFramework": "net10.0",
+        "Configuration": "Release"
+      }
+    }
+  ],
+  "build": {
+    "content": [
+      {
+        "files": [
+          "**/*.{md,yml}"
+        ],
+        "exclude": [
+          "_site/**",
+          "obj/**"
+        ]
+      },
+      {
+        "files": [
+          "api/**.yml",
+          "api/index.md"
+        ]
+      }
+    ],
+    "resource": [
+      {
+        "files": [
+          "images/**"
+        ],
+        "exclude": [
+          "_site/**",
+          "obj/**"
+        ]
+      }
+    ],
+    "output": "_site",
+    "template": [
+      "default",
+      "modern"
+    ],
+    "globalMetadata": {
+      "_appName": "Vellum",
+      "_appTitle": "Vellum — envelope encryption for .NET",
+      "_appFooter": "Vellum is licensed under Apache-2.0. Copyright (c) Vellum Contributors.",
+      "_enableSearch": true,
+      "_disableContribution": false,
+      "_gitContribute": {
+        "repo": "https://github.com/OkaySire/vellum",
+        "branch": "main"
+      },
+      "_gitUrlPattern": "github"
+    },
+    "globalMetadataFiles": [],
+    "fileMetadataFiles": [],
+    "xref": [],
+    "xrefService": [
+      "https://xref.docs.microsoft.com/query?uid={uid}"
+    ],
+    "sitemap": {
+      "baseUrl": "https://okaysire.github.io/vellum",
+      "priority": 0.5,
+      "changefreq": "monthly"
+    },
+    "markdownEngineName": "markdig",
+    "keepFileLink": false,
+    "disableGitFeatures": false
+  }
+}

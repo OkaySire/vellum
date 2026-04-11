@@ -1,0 +1,18 @@
+- name: Home
+  href: index.md
+- name: Getting started
+  href: getting-started.md
+- name: Architecture
+  href: architecture.md
+- name: FAQ
+  href: faq.md
+- name: Comparison
+  href: comparison.md
+- name: Migrations
+  items:
+    - name: From a custom implementation
+      href: migrations/from-custom.md
+- name: Consumer options bridging
+  href: consumer-options-bridging.md
+- name: API reference
+  href: api/
