@@ -91,6 +91,68 @@ For more complete wiring — feature-flagged rollouts, snake_case schemas, migra
 from a legacy encryption layer, `appsettings.json` bridging — see the
 [`samples/`](samples/) folder and [`docs/consumer-options-bridging.md`](docs/consumer-options-bridging.md).
 
+### Design-time scaffolder (`dotnet ef migrations add`)
+
+`dotnet ef` prefers an `IDesignTimeDbContextFactory<T>` over the host-build path when
+both are available. A factory that forgets to call `UseVellum(...)` produces
+`DbContextOptions` without the Vellum options extension, so the scaffolder generates a
+migration against Vellum's defaults (PascalCase column names, SQL Server filter
+syntax) even if the runtime `AddDbContext` pipeline is configured correctly.
+This is [issue #17](https://github.com/OkaySire/vellum/issues/17).
+
+Since `0.1.0-preview.3`, the recommended fix is to declare the Vellum schema once on
+the `DbContext` class with `[VellumEntityFrameworkOptions]`. The attribute is
+reflection-readable at both runtime and design time, so the scaffolder picks up the
+overrides with no duplication between `Program.cs` and the factory:
+
+```csharp
+[VellumEntityFrameworkOptions(
+    TableName = "bus_encryption_keys",
+    KeyIdColumnName = "key_id",
+    ScopeColumnName = "scope",
+    WrappedCiphertextColumnName = "wrapped_ciphertext",
+    WrappedProviderVersionColumnName = "wrapped_provider_version",
+    CreatedAtColumnName = "created_at",
+    ExpiresAtColumnName = "expires_at",
+    IsActiveColumnName = "is_active",
+    UniqueActiveIndexFilter = "\"is_active\" = true")]
+public sealed class AppDbContext(DbContextOptions<AppDbContext> opts) : DbContext(opts)
+{
+    protected override void OnModelCreating(ModelBuilder mb)
+    {
+        base.OnModelCreating(mb);
+        mb.AddVellumEncryptionKeys(this);
+    }
+}
+```
+
+The attribute resolution order is: (1) `UseVellum(...)` on the options builder, (2)
+`[VellumEntityFrameworkOptions]` on the context type, (3)
+`IOptions<VellumEntityFrameworkOptions>` from the application service provider, (4)
+defaults. Every attribute property the consumer leaves unset keeps the Vellum
+default, so a minimal decoration like
+`[VellumEntityFrameworkOptions(TableName = "bus_encryption_keys")]` is valid.
+
+As an alternative, an `IDesignTimeDbContextFactory<T>` can call `UseVellum(...)`
+explicitly alongside the provider extension:
+
+```csharp
+public sealed class AppDbContextFactory : IDesignTimeDbContextFactory<AppDbContext>
+{
+    public AppDbContext CreateDbContext(string[] args)
+    {
+        DbContextOptionsBuilder<AppDbContext> b = new();
+        b.UseNpgsql("Host=localhost;Database=app;Username=postgres;Password=postgres");
+        b.UseVellum(v => v.UniqueActiveIndexFilter = "\"IsActive\" = true");
+        return new AppDbContext(b.Options);
+    }
+}
+```
+
+Either pattern works. The attribute is cleaner when the Vellum schema is fixed at
+compile time; the factory pattern is more flexible when options come from a
+configuration source the factory can read directly.
+
 ## Building locally
 
 Requires the .NET 10 SDK (see `global.json`) plus the .NET 8 and .NET 9 runtimes for running the multi-target test suite.
