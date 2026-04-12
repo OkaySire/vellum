@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-preview.4] — 2026-04-12
+
+### Fixed
+- **PRODUCTION HOTFIX**: `DekManager` cache entries now specify `Size = 1` in `MemoryCacheEntryOptions`. Previously, consumers who configured `IMemoryCache` with a `SizeLimit` (standard in production for memory budgets) would get `InvalidOperationException: Cache entry must specify a value for Size when SizeLimit is set` on every encrypt/decrypt operation. ([L25](tasks/lessons.md))
+
+### Tests
+
+163 → 166 tests (net10.0 run), all green. Per-project breakdown:
+`Abstractions 7`, `Core 41` (+3), `EntityFrameworkCore 29`,
+`Static 24`, `InMemory 30`, `Vault 35`.
+
 ## [0.1.0-preview.3] — 2026-04-11
 
 Targeted follow-up to `0.1.0-preview.2` that closes the single dogfood friction
@@ -171,7 +182,8 @@ First public preview published to nuget.org. Phase 1 scaffold + `Vellum.Abstract
 - 150 tests green on net10.0 (compile-only on net8.0 / net9.0).
 - Audit remediation: 3 High, 7 Medium, 9 Low actionable findings fixed.
 
-[Unreleased]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.3...HEAD
+[Unreleased]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.4...HEAD
+[0.1.0-preview.4]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.3...v0.1.0-preview.4
 [0.1.0-preview.3]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.2...v0.1.0-preview.3
 [0.1.0-preview.2]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.1...v0.1.0-preview.2
 [0.1.0-preview.1]: https://github.com/OkaySire/vellum/releases/tag/v0.1.0-preview.1

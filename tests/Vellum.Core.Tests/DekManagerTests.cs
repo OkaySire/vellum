@@ -458,6 +458,100 @@ public sealed class DekManagerTests
     }
 
     [Fact]
+    public async Task GetActiveDekAsync_WithSizeLimitedCache_DoesNotThrow()
+    {
+        // L25: production crash — consumers who configure IMemoryCache with SizeLimit
+        // trigger InvalidOperationException if cache entries don't specify Size.
+        FakeKeyEncryptionProvider provider = new();
+        FakeEncryptionKeyStore store = new();
+        CountingRandomBytesProvider random = new();
+        MemoryCache cache = new(new MemoryCacheOptions { SizeLimit = 100 });
+        VellumOptions options = new();
+
+        DekManager sut = new(
+            provider,
+            store,
+            cache,
+            random,
+            TimeProvider.System,
+            Options.Create(options),
+            NullLogger<DekManager>.Instance);
+
+        Dek dek = await sut.GetActiveDekAsync(Scope);
+
+        dek.Should().NotBeNull();
+        dek.Key.Should().HaveCount(32);
+
+        // Second call hits the cache — must also not throw.
+        Dek cached = await sut.GetActiveDekAsync(Scope);
+        cached.KeyId.Should().Be(dek.KeyId);
+    }
+
+    [Fact]
+    public async Task GetDekByKeyIdAsync_WithSizeLimitedCache_DoesNotThrow()
+    {
+        // L25: the by-id cache path must also specify Size on cache entries.
+        FakeKeyEncryptionProvider provider = new();
+        FakeEncryptionKeyStore store = new();
+        CountingRandomBytesProvider random = new();
+        MemoryCache cache = new(new MemoryCacheOptions { SizeLimit = 100 });
+        VellumOptions options = new();
+
+        DekManager sut = new(
+            provider,
+            store,
+            cache,
+            random,
+            TimeProvider.System,
+            Options.Create(options),
+            NullLogger<DekManager>.Instance);
+
+        // Create a key first so we have a KeyId to look up.
+        Dek created = await sut.GetActiveDekAsync(Scope);
+
+        // Evict the cache to force the slow path through CacheByKeyId.
+        cache.Remove($"vellum:dek:id:{Scope}:{created.KeyId}");
+
+        Dek retrieved = await sut.GetDekByKeyIdAsync(created.KeyId, Scope);
+
+        retrieved.Should().NotBeNull();
+        retrieved.KeyId.Should().Be(created.KeyId);
+    }
+
+    [Fact]
+    public async Task GetDekByWrappedKeyAsync_WithSizeLimitedCache_DoesNotThrow()
+    {
+        // L25: the wrapped-key cache path must also specify Size on cache entries.
+        FakeKeyEncryptionProvider provider = new();
+        FakeEncryptionKeyStore store = new();
+        CountingRandomBytesProvider random = new();
+        MemoryCache cache = new(new MemoryCacheOptions { SizeLimit = 100 });
+        VellumOptions options = new();
+
+        DekManager sut = new(
+            provider,
+            store,
+            cache,
+            random,
+            TimeProvider.System,
+            Options.Create(options),
+            NullLogger<DekManager>.Instance);
+
+        byte[] plaintext = new byte[32];
+        plaintext[0] = 0xCA;
+        WrappedKey wrapped = await provider.WrapAsync(plaintext);
+
+        Dek first = await sut.GetDekByWrappedKeyAsync(wrapped);
+
+        first.Should().NotBeNull();
+        first.Key.Should().Equal(plaintext);
+
+        // Second call hits the cache — must also not throw.
+        Dek cached = await sut.GetDekByWrappedKeyAsync(wrapped);
+        cached.Key.Should().Equal(plaintext);
+    }
+
+    [Fact]
     public async Task GetDekByWrappedKeyAsync_NullWrappedKey_Throws()
     {
         DekManager sut = BuildSut(out _, out _, out _, out _);

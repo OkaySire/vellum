@@ -296,6 +296,7 @@ public sealed partial class DekManager(
         MemoryCacheEntryOptions entryOptions = new()
         {
             AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
+            Size = 1, // L25: required when consumer configures IMemoryCache with SizeLimit
         };
         _cache.Set(BuildActiveCacheKey(scope), dek, entryOptions);
         _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), dek, entryOptions);
@@ -311,6 +312,7 @@ public sealed partial class DekManager(
         MemoryCacheEntryOptions entryOptions = new()
         {
             AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
+            Size = 1, // L25: required when consumer configures IMemoryCache with SizeLimit
         };
         _cache.Set(cacheKey, dek, entryOptions);
     }
@@ -325,6 +327,7 @@ public sealed partial class DekManager(
         MemoryCacheEntryOptions entryOptions = new()
         {
             AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
+            Size = 1, // L25: required when consumer configures IMemoryCache with SizeLimit
         };
         _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), dek, entryOptions);
     }
