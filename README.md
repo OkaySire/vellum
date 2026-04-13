@@ -8,7 +8,7 @@
 [![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0-512BD4)](https://dotnet.microsoft.com/)
 [![Build & Test](https://github.com/OkaySire/vellum/actions/workflows/build.yml/badge.svg)](https://github.com/OkaySire/vellum/actions/workflows/build.yml)
 
-> **Status: `0.1.0-preview` — Not yet ready for production. API may change.**
+> **Status: `0.1.0` — First stable drop. Pre-1.0 (API may evolve in 0.2.0+, breaking changes allowed per semver). Production use is supported but cloud KMS providers (Azure Key Vault, AWS KMS, GCP KMS) are planned for 0.3.0.**
 
 ---
 
@@ -41,13 +41,13 @@ This pattern lets you rotate keys at the KEK level without re-encrypting every p
 
 ## Quickstart
 
-Install the packages (preview — mark `--prerelease`):
+Install the packages:
 
 ```bash
-dotnet add package Vellum.Abstractions       --prerelease
-dotnet add package Vellum.Core                --prerelease
-dotnet add package Vellum.Vault               --prerelease
-dotnet add package Vellum.EntityFrameworkCore --prerelease
+dotnet add package Vellum.Abstractions
+dotnet add package Vellum.Core
+dotnet add package Vellum.Vault
+dotnet add package Vellum.EntityFrameworkCore
 ```
 
 Wire Vellum into an ASP.NET Core / generic host app. Options for the EF Core store
@@ -83,9 +83,9 @@ string roundtrip          = await encryptor.DecryptStringAsync(envelope);
 ```
 
 The envelope carries its own wrapped DEK, so decryption is self-contained — no second
-DB round-trip. Since 0.1.0-preview.2, `DecryptAsync` is also backed by an in-memory
-cache keyed by the wrapped ciphertext (see [#6](https://github.com/OkaySire/vellum/issues/6)),
-so read-heavy workloads pay at most one KEK round-trip per distinct DEK.
+DB round-trip. `DecryptAsync` is backed by an in-memory cache keyed by the wrapped
+ciphertext (see [#6](https://github.com/OkaySire/vellum/issues/6)), so read-heavy
+workloads pay at most one KEK round-trip per distinct DEK.
 
 For more complete wiring — feature-flagged rollouts, snake_case schemas, migrations
 from a legacy encryption layer, `appsettings.json` bridging — see the
@@ -100,7 +100,7 @@ migration against Vellum's defaults (PascalCase column names, SQL Server filter
 syntax) even if the runtime `AddDbContext` pipeline is configured correctly.
 This is [issue #17](https://github.com/OkaySire/vellum/issues/17).
 
-Since `0.1.0-preview.3`, the recommended fix is to declare the Vellum schema once on
+The recommended fix is to declare the Vellum schema once on
 the `DbContext` class with `[VellumEntityFrameworkOptions]`. The attribute is
 reflection-readable at both runtime and design time, so the scaffolder picks up the
 overrides with no duplication between `Program.cs` and the factory:
@@ -165,17 +165,6 @@ dotnet test -c Release
 
 `--locked-mode` is mandatory: Vellum commits `packages.lock.json` for every project so transitive versions are pinned and auditable. Any drift fails the restore.
 
-## Release process
-
-Releases are manual. The `release.yml` workflow publishes to nuget.org automatically when a GitHub Release is published.
-
-1. Bump `VersionPrefix` / `VersionSuffix` in `Directory.Build.props`.
-2. Commit the bump and tag the commit: `git tag v0.1.0-preview.1 && git push --tags`.
-3. Create a **GitHub Release** targeting the tag (UI or `gh release create`).
-4. The `Release to NuGet` workflow packs all production packages and pushes them (with `.snupkg` symbols) to nuget.org.
-
-The `NUGET_API_KEY` repository secret must be configured (Settings → Secrets and variables → Actions). Without it the workflow still packs and uploads artifacts, but skips the nuget.org publish with a clear warning.
-
 ## Design principles
 
 1. **Provider-agnostic** — Vault, AWS KMS, Azure Key Vault, GCP KMS, static (dev) are first-class.
@@ -190,10 +179,6 @@ The `NUGET_API_KEY` repository secret must be configured (Settings → Secrets a
 ## Security
 
 Please see [SECURITY.md](SECURITY.md) for responsible disclosure and threat model.
-
-## Branch protection
-
-Branch protection on `main` must be configured manually in the GitHub UI (Settings → Branches → Add rule) to require the `build-test` job from `Build & Test` to pass before merge. This cannot be encoded in the workflow YAML.
 
 ## License
 
