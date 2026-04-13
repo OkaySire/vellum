@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-04-13
+
+### Stabilized
+
+- **First non-preview release.** Graduates from preview after 4 iterations of consumer dogfood (jacqcloud-buses, 3 migration cycles) and 1 production hotfix. No code changes from `0.1.0-preview.4` — this release only flips the version suffix. The API is considered usable for non-critical production workloads.
+- **Pre-1.0 disclaimer**: Semver 0.x.y allows breaking changes in minor versions. Expect potentially breaking API evolution in `0.2.0` (fluent API, rotation package) and `0.3.0` (cloud KMS providers). A stable `1.0` is planned after the external crypto audit + cloud provider completion.
+
+### Upcoming in 0.2.0
+
+- Vellum.Rotation package (background DEK rotation hosted service)
+- Vellum.AspNetCore package (health checks, OpenTelemetry)
+- VellumBuilder fluent API for discoverability
+- SchemaVersion on EF entity for future migration support
+
+### Upcoming in 0.3.0
+
+- Vellum.AzureKeyVault (Azure Key Vault KEK provider)
+- Vellum.AwsKms (AWS KMS KEK provider)
+- Vellum.GcpKms (Google Cloud KMS KEK provider)
+
 ## [0.1.0-preview.4] — 2026-04-12
 
 ### Fixed
@@ -182,7 +202,8 @@ First public preview published to nuget.org. Phase 1 scaffold + `Vellum.Abstract
 - 150 tests green on net10.0 (compile-only on net8.0 / net9.0).
 - Audit remediation: 3 High, 7 Medium, 9 Low actionable findings fixed.
 
-[Unreleased]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.4...HEAD
+[Unreleased]: https://github.com/OkaySire/vellum/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.4...v0.1.0
 [0.1.0-preview.4]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.3...v0.1.0-preview.4
 [0.1.0-preview.3]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.2...v0.1.0-preview.3
 [0.1.0-preview.2]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.1...v0.1.0-preview.2
