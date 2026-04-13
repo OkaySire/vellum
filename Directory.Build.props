@@ -29,7 +29,6 @@
 
   <PropertyGroup Label="Package metadata">
     <VersionPrefix>0.1.0</VersionPrefix>
-    <VersionSuffix>preview.4</VersionSuffix>
     <Authors>Vellum Contributors</Authors>
     <Company>Vellum</Company>
     <Product>Vellum</Product>
