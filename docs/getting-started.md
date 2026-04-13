@@ -22,8 +22,8 @@ unit test, stop after stage 1.
   PostgreSQL container. If you already have a Vault instance and a Postgres database,
   skip the Docker bits and point at yours.
 
-> Vellum is published to nuget.org as a preview. All install commands below include
-> `--prerelease` so the preview packages resolve correctly.
+> Vellum is published to nuget.org. Install commands below use `dotnet add package`
+> without any prerelease flag.
 
 ## 1. Dev-first console app
 
@@ -42,10 +42,7 @@ containers.
 ```bash
 mkdir vellum-quickstart && cd vellum-quickstart
 dotnet new console -f net10.0
-dotnet add package Vellum.Core     --prerelease
-dotnet add package Vellum.Static   --prerelease
-dotnet add package Vellum.InMemory --prerelease
-dotnet add package Microsoft.Extensions.Logging.Console
+dotnet add package Vellum.Core     dotnet add package Vellum.Static   dotnet add package Vellum.InMemory dotnet add package Microsoft.Extensions.Logging.Console
 ```
 
 You do not need to reference `Vellum.Abstractions` explicitly — `Vellum.Core` brings it in as
@@ -181,8 +178,7 @@ curl -sf -X POST \
 
 ```bash
 dotnet remove package Vellum.Static
-dotnet add    package Vellum.Vault --prerelease
-```
+dotnet add    package Vellum.Vault ```
 
 ### 2.3 Update `Program.cs`
 
@@ -252,8 +248,7 @@ docker run -d --name vellum-postgres \
 
 ```bash
 dotnet remove package Vellum.InMemory
-dotnet add    package Vellum.EntityFrameworkCore      --prerelease
-dotnet add    package Microsoft.EntityFrameworkCore   --version 10.*
+dotnet add    package Vellum.EntityFrameworkCore      dotnet add    package Microsoft.EntityFrameworkCore   --version 10.*
 dotnet add    package Npgsql.EntityFrameworkCore.PostgreSQL --version 10.*
 ```
 

@@ -1,6 +1,6 @@
 # Bridging consumer options into Vellum options
 
-> **Applies to**: Vellum 0.1.0-preview.2 and later
+> **Applies to**: Vellum 0.1.0 and later
 > **Source**: feedback from the jacqcloud-buses Phase 2 dogfood migration (section 1 friction #9)
 
 ## Problem
@@ -119,7 +119,7 @@ open for the deferred `Configure<IOptions<EncryptionOptions>>(...)` to fill in.
 ## Flowing options into `DbContextOptionsBuilder.UseVellum`
 
 If you prefer to configure the EF Core options on the `DbContextOptionsBuilder` (via
-`UseVellum`, see issue #9 in the 0.1.0-preview.2 release notes), you can pull consumer
+`UseVellum`, see issue #9), you can pull consumer
 options from the service provider that `AddDbContext<T>` passes into the options builder:
 
 ```csharp

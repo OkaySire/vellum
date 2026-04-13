@@ -9,10 +9,11 @@ management, key rotation, and multi-tenant support. It does not implement any cr
 primitive of its own — all authenticated encryption goes through
 `System.Security.Cryptography.AesGcm`.
 
-> **Status: `0.1.0-preview.3`.** The public API is stabilising but not yet locked. Cloud KMS
-> providers (Azure Key Vault, AWS KMS, GCP KMS) land in `0.3.0`. A background rotation worker
-> (`Vellum.Rotation`) and ASP.NET Core health checks (`Vellum.AspNetCore`) land in `0.4.0`. See
-> the [roadmap in the top-level README](https://github.com/OkaySire/vellum#packages) for the
+> **Status: `0.1.0`.** First stable drop. Pre-1.0: API may evolve in 0.2.0+, breaking changes
+> allowed per semver. Cloud KMS providers (Azure Key Vault, AWS KMS, GCP KMS) land in `0.3.0`.
+> A background rotation worker (`Vellum.Rotation`) and ASP.NET Core health checks
+> (`Vellum.AspNetCore`) land in `0.4.0`. See the
+> [roadmap in the top-level README](https://github.com/OkaySire/vellum#packages) for the
 > exact package list.
 
 ## Where to start

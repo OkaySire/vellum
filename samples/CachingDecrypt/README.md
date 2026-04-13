@@ -2,7 +2,7 @@
 
 > **This sample is a tombstone.** The pattern it documents — a decorator over
 > `IPayloadEncryptor` that caches unwrapped DEKs on the decrypt path — became
-> obsolete in **Vellum 0.1.0-preview.2** when the cache was baked directly into
+> obsolete when the cache was baked directly into
 > `Vellum.Core` via [#6](https://github.com/OkaySire/vellum/issues/6).
 
 ## Why this directory exists
@@ -19,9 +19,9 @@ that cached unwrapped DEKs by `KeyId` via `IMemoryCache`. That custom wrapper wa
 the "CachingDecrypt" pattern — and this folder was going to ship the canonical
 version of it.
 
-## What happened in preview.2
+## What happened
 
-Vellum 0.1.0-preview.2 (this release) adds
+Vellum added
 `IDekManager.GetDekByWrappedKeyAsync(WrappedKey)` which caches unwrapped DEKs keyed
 by a SHA-256 hash of the wrapped ciphertext. `Vellum.Core.PayloadEncryptor.DecryptAsync`
 now routes through it automatically — consumers get the caching behavior with zero

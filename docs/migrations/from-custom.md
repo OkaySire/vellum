@@ -711,7 +711,7 @@ had no decrypt-path cache at the time. That pattern became obsolete in `preview.
 Vellum added the built-in decrypt cache (issue #6), and the adapter was deleted in
 iteration 2.
 
-**Do not write a `VellumBackedPayloadEncryptor` today.** Start on `preview.3`, use
+**Do not write a `VellumBackedPayloadEncryptor` today.** Start on the latest version, use
 `IPayloadEncryptor` directly, and skip the adapter entirely. The only situation that
 still benefits from a decorator over `IPayloadEncryptor` is a feature-flag gate — see
 [`samples/FeatureFlagged`](../../samples/FeatureFlagged/README.md) for the reference
@@ -816,9 +816,8 @@ each one closing a loop with the Vellum team. The anonymised timeline:
 
 ### Lessons for your migration
 
-- **Start on `preview.3`** (or whatever the latest version is when you read this). The
-  intermediate frictions have already been fixed; you get the final canonical shape on
-  day one.
+- **Start on the latest version** (`0.1.0` or newer). The intermediate frictions from the
+  preview iterations have already been fixed; you get the final canonical shape on day one.
 - **Plan for iteration.** Your first migration will surface at least one friction that
   was not in this guide. File an issue upstream — the Vellum team responds to consumer
   feedback by shipping releases, not by arguing.

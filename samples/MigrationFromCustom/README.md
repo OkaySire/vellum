@@ -49,7 +49,7 @@ added in [#8](https://github.com/OkaySire/vellum/issues/8)) is:
 | `ExpiresAt`               | `TIMESTAMPTZ`     |                                    |
 | `IsActive`                | `BOOLEAN`         |                                    |
 
-Note — since 0.1.0-preview.2, consumers can rename each column via
+Note — consumers can rename each column via
 `VellumEntityFrameworkOptions` (e.g. to stay snake_case). This sample uses the
 PascalCase defaults for clarity; see
 [`samples/AspNetCore.Postgres.Vault`](../AspNetCore.Postgres.Vault) for a snake_case

@@ -21,9 +21,9 @@ design docs for the long version.
 
 ## Is Vellum production-ready?
 
-**Partially.** Vellum `0.1.0-preview.3` is in use by at least one real consumer in
-production (an early adopter's multi-tenant message bus backend, after three iterations of
-dogfood feedback that drove most of the preview.2 and preview.3 changes). The shipped
+**Yes, for non-critical production workloads.** Vellum `0.1.0` is in use by at least one
+real consumer in production (an early adopter's multi-tenant message bus backend, after
+three iterations of dogfood feedback that drove most of the pre-1.0 changes). The shipped
 packages — `Vellum.Abstractions`, `Vellum.Core`, `Vellum.Vault`, `Vellum.Static`,
 `Vellum.InMemory`, and `Vellum.EntityFrameworkCore` — are all fully tested, all zero-warning
 builds, and all subject to the same `TreatWarningsAsErrors` + `AllEnabledByDefault`
@@ -31,8 +31,8 @@ analyzer posture as the rest of the library.
 
 What is **not** yet production-ready:
 
-- **The public API is not frozen.** It is stabilising (three iterations of consumer
-  feedback drove most of the API shape in preview.2), but semver guarantees only kick in at
+- **The public API is not frozen.** It is stable (three iterations of consumer
+  feedback drove most of the API shape), but semver guarantees only kick in at
   `1.0.0`. Expect additive changes between now and then; breaking changes, if any, will
   land as clear `CHANGELOG.md` entries with migration notes.
 - **Cloud KEK providers are not shipped yet.** `Vellum.AzureKeyVault`, `Vellum.AwsKms`, and
@@ -304,7 +304,7 @@ even if the runtime `AddDbContext` pipeline is configured correctly.
 
 An early-adopter backend hit this exact bug while trying to adopt snake_case column
 overrides in iteration 2 of their dogfood. The fix is the `[VellumEntityFrameworkOptions]`
-attribute, added in `0.1.0-preview.3` (issue #17). Decorate your `DbContext` class with
+attribute (issue [#17](https://github.com/OkaySire/vellum/issues/17)). Decorate your `DbContext` class with
 it, list the overrides you want, and Vellum's model builder extension reads the attribute
 via reflection at both runtime and design time — so the scaffolded migration always
 matches the runtime schema, regardless of which code path the tooling took.

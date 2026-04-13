@@ -11,7 +11,7 @@ and run them against local HEAD without installing anything from NuGet.
 | [`AspNetCore.Postgres.Vault`](AspNetCore.Postgres.Vault) | Full web-app stack: ASP.NET Core minimal API + Npgsql + HashiCorp Vault Transit. Ships a `docker-compose.yml` for local Vault + Postgres containers. |
 | [`FeatureFlagged`](FeatureFlagged) | `IPayloadEncryptor` decorator gated on `IOptionsMonitor<FeatureFlags>` for staged rollouts. Sentinel-passthrough pattern documented in the README. |
 | [`MigrationFromCustom`](MigrationFromCustom) | Recipe (not a runnable project) for migrating an existing custom encryption layer to Vellum, with the exact EF Core migration used by `jacqcloud-buses` v0.1.63 → Vellum 0.1.0-preview.1. Includes the gotchas the migration suite caught (e.g. `'v<N>'` vs `'<N>'`). |
-| [`CachingDecrypt`](CachingDecrypt) | **Tombstone.** Documents why this pattern became obsolete in 0.1.0-preview.2 after [#6](https://github.com/OkaySire/vellum/issues/6) baked the decrypt cache directly into `Vellum.Core`. |
+| [`CachingDecrypt`](CachingDecrypt) | **Tombstone.** Documents why this pattern became obsolete after [#6](https://github.com/OkaySire/vellum/issues/6) baked the decrypt cache directly into `Vellum.Core`. |
 
 ## Running a sample
 
