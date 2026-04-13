@@ -11,29 +11,17 @@ A formal support policy will be published with the `1.0.0` release.
 | `0.1.x-preview` | Best-effort only |
 | `< 0.1.0` | No |
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-**Do not file public GitHub issues for security vulnerabilities.**
+Please report security vulnerabilities via **[GitHub Security Advisories](https://github.com/OkaySire/vellum/security/advisories/new)**.
 
-Instead, please report vulnerabilities privately via:
+This creates a private channel between you and the maintainers. We will:
+- Acknowledge receipt within 72 hours
+- Validate the report and develop a fix
+- Coordinate a public disclosure with you (typically 90 days max)
+- Credit you in the release notes if you wish
 
-- **GitHub Security Advisories**: https://github.com/vellum-dotnet/vellum/security/advisories/new
-- **Email**: security@vellum.dev _(placeholder — to be finalized before `0.1.0-preview`)_
-
-Please include:
-
-1. A description of the vulnerability and its impact.
-2. Steps to reproduce (proof of concept if possible).
-3. Affected versions or commit hashes.
-4. Suggested mitigations, if any.
-
-We will acknowledge receipt within **72 hours** and provide a target timeline for a fix within **7 days**.
-
-## Disclosure Policy
-
-- We follow **coordinated disclosure**.
-- We will work with you to validate the report, develop a fix, and coordinate a public announcement.
-- Security advisories will be published via GitHub Security Advisories and the `CHANGELOG.md`.
+Please do NOT report vulnerabilities via public GitHub issues or discussions.
 
 ## Security Principles
 
