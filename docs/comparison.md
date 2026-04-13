@@ -22,7 +22,7 @@ scenarios where Vellum is explicitly not the best choice.
 
 ## Feature matrix
 
-| Dimension | Vellum `0.1.0-preview.3` | `Microsoft.AspNetCore.DataProtection` | AWS Encryption SDK for .NET | Google Tink (.NET) | Hand-rolled |
+| Dimension | Vellum `0.1.0` | `Microsoft.AspNetCore.DataProtection` | AWS Encryption SDK for .NET | Google Tink (.NET) | Hand-rolled |
 |---|---|---|---|---|---|
 | **Envelope encryption (DEK + KEK)** | Yes, first-class | No (key ring only) | Yes, first-class | Yes, via KMS AEAD primitives | Usually yes |
 | **Provider-agnostic KEK backends** | Yes (Vault shipped; Azure KV / AWS KMS / GCP KMS planned `0.3.0`) | No — DataProtection manages its own keyring internally | Yes (AWS KMS + multi-provider keyrings) | Yes (AWS KMS, GCP KMS, HashiCorp Vault via community providers) | Usually single-backend |
@@ -34,7 +34,7 @@ scenarios where Vellum is explicitly not the best choice.
 | **Authenticated encryption (AES-GCM)** | Yes, AES-256-GCM only | AES-256-CBC + HMAC-SHA-256 (authenticated) by default | AES-256-GCM with optional additional modes | AES-256-GCM, ChaCha20-Poly1305, AES-EAX | Usually AES-GCM |
 | **License** | Apache-2.0 | MIT | Apache-2.0 | Apache-2.0 | — |
 | **Active maintenance (as of April 2026)** | Active (multiple releases in April 2026) | Active (ships with every .NET release) | Active (AWS owned, regular releases) | Active (Google owned, community .NET port) | You maintain it |
-| **Production-ready claim** | Preview — honest about it; `0.1.0-preview.3` | Yes, standard in every ASP.NET Core app | Yes, standard in AWS-centric shops | Yes for the primitives; the .NET port lags the Java / Go one | Your tests decide |
+| **Production-ready claim** | Pre-1.0 stable — honest about it; first non-preview drop, production-validated | Yes, standard in every ASP.NET Core app | Yes, standard in AWS-centric shops | Yes for the primitives; the .NET port lags the Java / Go one | Your tests decide |
 
 ## When to pick each one
 
@@ -107,9 +107,9 @@ that the right answer was "use a library that already solved them".
   as the rest of your schema.
 - …you need **multi-tenant isolation** enforced by the library, not by convention, with
   cache-partitioned DEK lookups and scope-verified historical key resolution.
-- …you are willing to accept a **preview API** that is stabilising but not yet frozen, in
+- …you are willing to accept a **pre-1.0 API** that is stable but not yet frozen, in
   exchange for a library that has already been dogfooded through three consumer feedback
-  iterations.
+  iterations and a production hotfix cycle.
 
 **Do not use Vellum for**: protecting ASP.NET Core cookies (use `DataProtection`),
 single-cloud AWS workloads where you would prefer to own the KMS integration directly (use

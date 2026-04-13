@@ -2,7 +2,7 @@
 
 > A minimal web app that encrypts "secret notes" via AES-GCM, wraps the DEK
 > through HashiCorp Vault Transit, and persists the wrapped DEK in PostgreSQL
-> through `Vellum.EntityFrameworkCore`. Uses the new 0.1.0-preview.2 single-source
+> through `Vellum.EntityFrameworkCore`. Uses the single-source
 > options flow (`UseVellum` + `AddEntityFrameworkCoreStore<T>`, no literal
 > duplication).
 
