@@ -60,6 +60,16 @@ public sealed partial class PayloadEncryptor(
         Dek dek = await _dekManager.GetActiveDekAsync(scope, cancellationToken).ConfigureAwait(false);
         try
         {
+            // H-1 symmetry (encrypt side): AesGcm accepts 16/24/32-byte keys, so a buggy
+            // IDekManager (or KEK provider behind it) returning a short DEK would silently
+            // downgrade new envelopes to AES-128. Pin the AES-256 contract here, mirroring
+            // the decrypt-side check below, so the downgrade fails closed instead.
+            if (dek.Key.Length != DekSizeBytes)
+            {
+                throw new CryptographicException(
+                    $"Active DEK has invalid length: expected {DekSizeBytes} bytes (AES-256), got {dek.Key.Length}.");
+            }
+
             byte[] nonce = new byte[NonceSize];
             _randomBytes.Fill(nonce);
 
@@ -73,7 +83,12 @@ public sealed partial class PayloadEncryptor(
             }
 
             LogPayloadEncrypted(_logger, scope);
-            return new EncryptedPayload(ciphertextWithTag, nonce, dek.WrappedKey, dek.KeyId);
+            return new EncryptedPayload(
+                ciphertextWithTag,
+                nonce,
+                dek.WrappedKey,
+                dek.KeyId,
+                FormatVersion: EncryptedPayload.CurrentFormatVersion);
         }
         finally
         {
@@ -87,6 +102,16 @@ public sealed partial class PayloadEncryptor(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(payload);
+
+        // Fail closed on unknown envelope formats BEFORE any crypto work (no DEK unwrap, no
+        // KEK round-trip, no AES-GCM call). A future format may change the AAD, add key
+        // commitment, or switch algorithms — interpreting its bytes under the version-1
+        // layout would be undefined behavior at best and a security bug at worst.
+        if (payload.FormatVersion != EncryptedPayload.CurrentFormatVersion)
+        {
+            throw new CryptographicException(
+                $"Unsupported envelope format version {payload.FormatVersion}: this version of Vellum only supports format version {EncryptedPayload.CurrentFormatVersion}.");
+        }
 
         if (payload.Nonce.Length != NonceSize)
         {

@@ -283,6 +283,110 @@ public sealed class PayloadEncryptorTests
     }
 
     [Fact]
+    public async Task EncryptAsync_StampsCurrentFormatVersion()
+    {
+        // C-1/C-2: every freshly produced envelope must carry the current wire-format
+        // version so that persisted envelopes are self-describing and future format
+        // changes (AAD, key commitment, algorithm) can be detected at decrypt time.
+        (PayloadEncryptor encryptor, _, _) = BuildSut();
+
+        EncryptedPayload envelope = await encryptor.EncryptAsync(
+            Encoding.UTF8.GetBytes("version stamp"),
+            Scope);
+
+        envelope.FormatVersion.Should().Be(EncryptedPayload.CurrentFormatVersion);
+        envelope.FormatVersion.Should().Be(1, "version 1 is the only format ever produced so far");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    [InlineData(99)]
+    public async Task Decrypt_UnsupportedFormatVersion_FailsClosedBeforeAnyCryptoWork(int unsupportedVersion)
+    {
+        // C-2: an unknown format version must be rejected BEFORE any crypto work — no DEK
+        // unwrap, no KEK round-trip, no AES-GCM call. Interpreting a future format's bytes
+        // under the version-1 layout would be undefined behavior.
+        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut();
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("unknown version");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
+        EncryptedPayload futuristic = envelope with { FormatVersion = unsupportedVersion };
+
+        int unwrapsBefore = provider.UnwrapCalls;
+        Func<Task> act = async () => await encryptor.DecryptAsync(futuristic);
+
+        await act.Should().ThrowAsync<CryptographicException>()
+            .WithMessage($"*format version {unsupportedVersion}*");
+        provider.UnwrapCalls.Should().Be(unwrapsBefore,
+            "version validation must fire before any DEK unwrap / KEK round-trip");
+
+        // The rejection must not have touched the envelope: the original (version-1) copy
+        // sharing the same ciphertext/nonce arrays still decrypts.
+        byte[] decrypted = await encryptor.DecryptAsync(envelope);
+        decrypted.Should().Equal(plaintext);
+    }
+
+    [Fact]
+    public async Task Decrypt_LegacyEnvelopeWithoutExplicitVersion_StillDecrypts()
+    {
+        // Backward compatibility: consumers that persisted envelopes field-by-field before
+        // FormatVersion existed reconstruct them with the original four positional
+        // arguments. The constructor defaults FormatVersion to CurrentFormatVersion (1),
+        // which is exactly the format those envelopes were produced under.
+        (PayloadEncryptor encryptor, _, _) = BuildSut();
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("legacy envelope");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
+
+        EncryptedPayload legacy = new(envelope.Ciphertext, envelope.Nonce, envelope.WrappedDek, envelope.KeyId);
+
+        legacy.FormatVersion.Should().Be(EncryptedPayload.CurrentFormatVersion);
+        byte[] decrypted = await encryptor.DecryptAsync(legacy);
+        decrypted.Should().Equal(plaintext);
+    }
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(24)]
+    public async Task Encrypt_DekManagerReturnsShortDek_ThrowsAndPreservesAes256Contract(int dekBytesLength)
+    {
+        // H-1 symmetry (encrypt side): AesGcm accepts 16/24/32-byte keys, so a buggy
+        // IDekManager returning a short DEK would silently downgrade NEW envelopes to
+        // AES-128/192. PayloadEncryptor must reject anything that is not 32 bytes.
+        FixedDekManager dekManager = new(dekBytesLength);
+        PayloadEncryptor encryptor = new(
+            dekManager,
+            new CountingRandomBytesProvider(),
+            NullLogger<PayloadEncryptor>.Instance);
+
+        Func<Task> act = async () => await encryptor.EncryptAsync(
+            Encoding.UTF8.GetBytes("downgrade check"),
+            Scope);
+
+        await act.Should().ThrowAsync<CryptographicException>()
+            .WithMessage("*expected 32 bytes*");
+    }
+
+    [Fact]
+    public async Task Encrypt_DekManagerReturns32ByteDek_Succeeds()
+    {
+        // Companion to the anti-downgrade theory above: the same fake manager with a
+        // 32-byte DEK passes the length gate and produces a valid envelope.
+        FixedDekManager dekManager = new(dekBytesLength: 32);
+        PayloadEncryptor encryptor = new(
+            dekManager,
+            new CountingRandomBytesProvider(),
+            NullLogger<PayloadEncryptor>.Instance);
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("aes-256 ok");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
+
+        envelope.Ciphertext.Length.Should().Be(plaintext.Length + 16);
+        envelope.FormatVersion.Should().Be(EncryptedPayload.CurrentFormatVersion);
+    }
+
+    [Fact]
     public async Task EncryptAsync_ConcurrentCalls_AllNoncesAreDistinct()
     {
         // L-5: nonce reuse in AES-GCM is the #1 catastrophic failure mode of the algorithm —
@@ -338,5 +442,37 @@ public sealed class PayloadEncryptorTests
 
         public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
             => Task.FromResult(new byte[dekBytesLength]);
+    }
+
+    /// <summary>
+    /// Minimal <see cref="IDekManager"/> whose <see cref="GetActiveDekAsync"/> returns a DEK
+    /// of the configured length, bypassing the real DekManager's own length enforcement.
+    /// Used to prove that <see cref="PayloadEncryptor"/> rejects short DEKs on the ENCRYPT
+    /// path itself (anti-downgrade), independent of upstream guarantees. A fresh array is
+    /// handed out per call because PayloadEncryptor zeroes the key in its finally block.
+    /// </summary>
+    private sealed class FixedDekManager(int dekBytesLength) : IDekManager
+    {
+        private static readonly WrappedKey _wrappedKey = new("fixed:v1", "v1");
+        private static readonly Guid _keyId = Guid.NewGuid();
+
+        public ValueTask<Dek> GetActiveDekAsync(string scope, CancellationToken cancellationToken = default)
+        {
+            byte[] key = new byte[dekBytesLength];
+            RandomNumberGenerator.Fill(key);
+            return ValueTask.FromResult(new Dek(key, _keyId, _wrappedKey));
+        }
+
+        public Task<Dek> CreateDekAsync(string scope, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Not used by these tests.");
+
+        public Task RotateDekAsync(string scope, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Not used by these tests.");
+
+        public ValueTask<Dek> GetDekByKeyIdAsync(Guid keyId, string scope, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Not used by these tests.");
+
+        public ValueTask<Dek> GetDekByWrappedKeyAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Not used by these tests.");
     }
 }
