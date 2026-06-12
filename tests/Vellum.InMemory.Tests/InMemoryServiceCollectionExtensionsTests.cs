@@ -120,6 +120,9 @@ public sealed class InMemoryServiceCollectionExtensionsTests
         public Task DeactivateAllAsync(string scope, CancellationToken cancellationToken = default)
             => Task.CompletedTask;
 
+        public Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default)
+            => Task.FromResult(newKey);
+
         public Task<IReadOnlyList<EncryptionKey>> GetHistoricalAsync(string scope, CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<EncryptionKey>>(Array.Empty<EncryptionKey>());
 

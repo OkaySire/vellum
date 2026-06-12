@@ -49,10 +49,19 @@ public interface IDekManager
     public Task<Dek> CreateDekAsync(string scope, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Rotates the active DEK for the given scope: deactivates the current active key and creates a new one.
+    /// Rotates the active DEK for the given scope: generates and wraps a new key, then atomically
+    /// swaps it in as the active key (deactivating the previous one) via
+    /// <see cref="IEncryptionKeyStore.RotateAsync(EncryptionKey, System.Threading.CancellationToken)"/>.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Historical payloads remain decryptable via <see cref="GetDekByKeyIdAsync(System.Guid, string, System.Threading.CancellationToken)"/>.
+    /// </para>
+    /// <para>
+    /// <b>Fail-safe.</b> If the KEK provider or the store fails at any point, the method throws and
+    /// the previously-active key remains active (and cached): the scope is never left without an
+    /// active DEK.
+    /// </para>
     /// </remarks>
     /// <param name="scope">Opaque scope identifier.</param>
     /// <param name="cancellationToken">Cancellation token.</param>

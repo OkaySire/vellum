@@ -186,6 +186,197 @@ public sealed class EntityFrameworkCoreEncryptionKeyStoreTests
         activeB!.KeyId.Should().Be(keyB.KeyId);
     }
 
+    // ---------- RotateAsync (A1 — atomic swap) ----------
+
+    [Fact]
+    public async Task RotateAsync_AtomicallySwapsActiveKey()
+    {
+        await using TestHarness harness = new();
+        EncryptionKey first = MakeKey(ScopeA);
+        await harness.Store.CreateAsync(first);
+
+        EncryptionKey replacement = MakeKey(ScopeA);
+        EncryptionKey returned = await harness.Store.RotateAsync(replacement);
+
+        returned.KeyId.Should().Be(replacement.KeyId);
+
+        EncryptionKey? active = await harness.Store.GetActiveAsync(ScopeA);
+        active.Should().NotBeNull();
+        active!.KeyId.Should().Be(replacement.KeyId);
+
+        IReadOnlyList<EncryptionKey> history = await harness.Store.GetHistoricalAsync(ScopeA);
+        history.Should().HaveCount(2);
+        history.Single(k => k.KeyId == first.KeyId).IsActive.Should().BeFalse();
+
+        // The filtered unique index never saw two active rows: exactly one active in the DB.
+        int activeCount = await harness.Context.Set<EncryptionKeyRecord>()
+            .IgnoreQueryFilters()
+            .CountAsync(k => k.Scope == ScopeA && k.IsActive);
+        activeCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task RotateAsync_EmptyScope_InstallsActiveKey()
+    {
+        await using TestHarness harness = new();
+        EncryptionKey key = MakeKey(ScopeA);
+
+        EncryptionKey returned = await harness.Store.RotateAsync(key);
+
+        returned.KeyId.Should().Be(key.KeyId);
+        (await harness.Store.GetActiveAsync(ScopeA))!.KeyId.Should().Be(key.KeyId);
+    }
+
+    [Fact]
+    public async Task RotateAsync_OnlyTouchesMatchingScope()
+    {
+        await using TestHarness harness = new();
+        EncryptionKey keyB = MakeKey(ScopeB);
+        await harness.Store.CreateAsync(MakeKey(ScopeA));
+        await harness.Store.CreateAsync(keyB);
+
+        await harness.Store.RotateAsync(MakeKey(ScopeA));
+
+        EncryptionKey? activeB = await harness.Store.GetActiveAsync(ScopeB);
+        activeB.Should().NotBeNull();
+        activeB!.KeyId.Should().Be(keyB.KeyId);
+    }
+
+    [Fact]
+    public async Task RotateAsync_InactiveKey_ThrowsFailClosed()
+    {
+        await using TestHarness harness = new();
+        EncryptionKey old = MakeKey(ScopeA);
+        await harness.Store.CreateAsync(old);
+
+        EncryptionKey inactive = MakeKey(ScopeA) with { IsActive = false };
+        Func<Task> act = async () => await harness.Store.RotateAsync(inactive);
+
+        await act.Should().ThrowAsync<ArgumentException>(
+            "installing an inactive key would leave the scope with zero active keys");
+        (await harness.Store.GetActiveAsync(ScopeA))!.KeyId.Should().Be(old.KeyId);
+    }
+
+    [Fact]
+    public async Task RotateAsync_NullKey_Throws()
+    {
+        await using TestHarness harness = new();
+
+        Func<Task> act = async () => await harness.Store.RotateAsync(null!);
+
+        await act.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    [Fact]
+    public async Task RotateAsync_OnFailure_OldKeyStillActive_AndThrows()
+    {
+        // A1 failure injection: provoke a DbUpdateException that is NOT a rotation race by
+        // colliding the new key's primary key with a pre-existing row on another scope. The
+        // single-SaveChanges transaction must roll back COMPLETELY: the old key stays active,
+        // no new row appears, and the store throws fail-closed (it must not mask the failure
+        // by returning the still-active old key as if a concurrent rotation had won).
+        await using TestHarness harness = new();
+
+        Guid sharedKeyId = Guid.NewGuid();
+        EncryptionKey preexisting = new(
+            KeyId: sharedKeyId,
+            Scope: "tenant:other",
+            WrappedKey: new WrappedKey("ciphertext-preexisting", "v1"),
+            CreatedAt: DateTimeOffset.UtcNow,
+            ExpiresAt: null,
+            IsActive: false);
+        await harness.Store.CreateAsync(preexisting);
+
+        EncryptionKey old = MakeKey(ScopeA);
+        await harness.Store.CreateAsync(old);
+
+        // Fresh store/context so the PK collision surfaces at the database, not the tracker.
+        EntityFrameworkCoreEncryptionKeyStore<TestDbContext> freshStore = harness.CreateStore();
+        EncryptionKey colliding = MakeKey(ScopeA) with { KeyId = sharedKeyId };
+
+        Func<Task> act = async () => await freshStore.RotateAsync(colliding);
+
+        (await act.Should().ThrowAsync<InvalidOperationException>(
+                "a non-race DbUpdateException must surface fail-closed"))
+            .Which.InnerException.Should().BeAssignableTo<DbUpdateException>();
+
+        // Atomicity: the rollback restored the old key — the scope never lost its active DEK.
+        EncryptionKey? active = await harness.Store.GetActiveAsync(ScopeA);
+        active.Should().NotBeNull("the failed rotation must leave the old key active");
+        active!.KeyId.Should().Be(old.KeyId);
+
+        int scopeRows = await harness.Context.Set<EncryptionKeyRecord>()
+            .IgnoreQueryFilters()
+            .CountAsync(k => k.Scope == ScopeA);
+        scopeRows.Should().Be(1, "the colliding candidate must not have been inserted");
+    }
+
+    [Fact]
+    public async Task ConcurrentRotateAsync_SameScope_ExactlyOneActiveAtEnd()
+    {
+        // Concurrent rotations from independent stores/contexts on the shared SQLite file.
+        // Each rotation either commits its own candidate or detects the race and returns the
+        // concurrent winner. Whatever the interleaving, the filtered unique index plus the
+        // single-transaction swap guarantee exactly one active row at the end.
+        await using TestHarness harness = new();
+        await harness.Store.CreateAsync(MakeKey(ScopeA));
+
+        const int parallelism = 8;
+        EncryptionKey[] candidates = new EncryptionKey[parallelism];
+        Task<EncryptionKey>[] tasks = new Task<EncryptionKey>[parallelism];
+
+        for (int i = 0; i < parallelism; i++)
+        {
+            candidates[i] = MakeKey(ScopeA);
+        }
+
+        for (int i = 0; i < parallelism; i++)
+        {
+            EncryptionKey candidate = candidates[i];
+            EntityFrameworkCoreEncryptionKeyStore<TestDbContext> store = harness.CreateStore();
+            tasks[i] = Task.Run(async () => await store.RotateAsync(candidate));
+        }
+
+        EncryptionKey[] results = await Task.WhenAll(tasks);
+
+        int activeCount = await harness.Context.Set<EncryptionKeyRecord>()
+            .IgnoreQueryFilters()
+            .CountAsync(k => k.Scope == ScopeA && k.IsActive);
+        activeCount.Should().Be(1, "rotation must never leave zero or multiple active keys");
+
+        EncryptionKey? active = await harness.Store.GetActiveAsync(ScopeA);
+        candidates.Select(c => c.KeyId).Should().Contain(active!.KeyId,
+            "the final active key must be one of the rotation candidates");
+        results.Should().AllSatisfy(result => result.Should().NotBeNull());
+    }
+
+    [Fact]
+    public async Task ConcurrentRotateAsync_VersusCreate_InvariantHolds()
+    {
+        // Rotate-vs-create storm on an initially-empty scope: whichever operations win, the
+        // scope must end with exactly one active key.
+        await using TestHarness harness = new();
+
+        const int pairs = 4;
+        Task[] tasks = new Task[pairs * 2];
+        for (int i = 0; i < pairs; i++)
+        {
+            EntityFrameworkCoreEncryptionKeyStore<TestDbContext> createStore = harness.CreateStore();
+            EntityFrameworkCoreEncryptionKeyStore<TestDbContext> rotateStore = harness.CreateStore();
+            EncryptionKey createCandidate = MakeKey(ScopeA);
+            EncryptionKey rotateCandidate = MakeKey(ScopeA);
+            tasks[i * 2] = Task.Run(async () => await createStore.CreateAsync(createCandidate));
+            tasks[(i * 2) + 1] = Task.Run(async () => await rotateStore.RotateAsync(rotateCandidate));
+        }
+
+        await Task.WhenAll(tasks);
+
+        int activeCount = await harness.Context.Set<EncryptionKeyRecord>()
+            .IgnoreQueryFilters()
+            .CountAsync(k => k.Scope == ScopeA && k.IsActive);
+        activeCount.Should().Be(1);
+    }
+
     // ---------- GetHistoricalAsync ----------
 
     [Fact]

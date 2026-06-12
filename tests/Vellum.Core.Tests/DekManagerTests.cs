@@ -164,32 +164,305 @@ public sealed class DekManagerTests
     }
 
     [Fact]
-    public async Task RotateDekAsync_DeactivatesAllAndCreatesNew()
+    public async Task RotateDekAsync_AtomicallySwapsViaStoreRotate()
     {
+        // A1/A2: rotation pins the NEW fail-safe order — a single atomic store.RotateAsync
+        // (deactivate-old + insert-new in one transaction), never the old two-step
+        // DeactivateAllAsync-then-CreateAsync sequence that could leave the scope with zero
+        // active keys when the KEK provider failed in between.
         DekManager sut = BuildSut(out _, out FakeEncryptionKeyStore store, out _, out _);
 
         Dek first = await sut.GetActiveDekAsync(Scope);
         await sut.RotateDekAsync(Scope);
         Dek second = await sut.GetActiveDekAsync(Scope);
 
-        store.DeactivateCalls.Should().Be(1);
+        store.RotateCalls.Should().Be(1, "rotation must go through the atomic store swap");
+        store.DeactivateCalls.Should().Be(0, "the unsafe two-step deactivate-then-create order is gone");
         second.KeyId.Should().NotBe(first.KeyId);
+
+        IReadOnlyList<EncryptionKey> history = await store.GetHistoricalAsync(Scope);
+        history.Where(k => k.IsActive).Should().ContainSingle()
+            .Which.KeyId.Should().Be(second.KeyId);
     }
 
     [Fact]
-    public async Task RotateDekAsync_EvictsCacheBeforeCreatingNew()
+    public async Task RotateDekAsync_ReplacesActiveCacheEntry_WithoutEvictionWindow()
     {
+        // A2: rotation must atomically REPLACE the active cache entry (_cache.Set) rather than
+        // Remove-then-repopulate — readers either see the old DEK or the new one, never a miss.
         DekManager sut = BuildSut(out _, out _, out _, out IMemoryCache cache);
 
         await sut.GetActiveDekAsync(Scope);
-        cache.TryGetValue($"vellum:dek:active:{Scope}", out _).Should().BeTrue();
+        cache.TryGetValue($"vellum:dek:active:{Scope}", out Dek? before).Should().BeTrue();
 
         await sut.RotateDekAsync(Scope);
 
-        // After rotation the newly-created DEK is in the cache again, but its KeyId
-        // must differ from the previous entry — exercised in the sibling test.
         cache.TryGetValue($"vellum:dek:active:{Scope}", out Dek? after).Should().BeTrue();
         after.Should().NotBeNull();
+        after!.KeyId.Should().NotBe(before!.KeyId, "the entry must be swapped to the new DEK in place");
+    }
+
+    [Fact]
+    public async Task RotateDekAsync_WrapFails_OldKeyStillActiveAndCacheStillServes()
+    {
+        // A2: the production root cause. If the KEK provider (Vault) fails during rotation,
+        // NOTHING must change: the store is untouched (old key still active) and the cache
+        // still serves the old DEK — encrypts keep working. The old order (deactivate →
+        // evict cache → wrap) left the scope with zero active DEKs on a Vault hiccup.
+        FakeKeyEncryptionProvider inner = new();
+        FailingWrapProvider provider = new(inner);
+        FakeEncryptionKeyStore store = new();
+        MemoryCache cache = new(new MemoryCacheOptions());
+        DekManager sut = new(
+            provider,
+            store,
+            cache,
+            new CountingRandomBytesProvider(),
+            TimeProvider.System,
+            Options.Create(new VellumOptions()),
+            NullLogger<DekManager>.Instance);
+
+        Dek original = await sut.GetActiveDekAsync(Scope);
+
+        provider.FailWraps = true;
+        Func<Task> act = async () => await sut.RotateDekAsync(Scope);
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*KEK provider unavailable*");
+
+        // Store untouched: the rotation never reached the store.
+        store.RotateCalls.Should().Be(0, "wrap failed before any store mutation");
+        store.DeactivateCalls.Should().Be(0);
+        EncryptionKey? activeInStore = await store.GetActiveAsync(Scope);
+        activeInStore.Should().NotBeNull();
+        activeInStore!.KeyId.Should().Be(original.KeyId, "the old key must still be active");
+
+        // Cache untouched: encrypts keep being served from the cached old DEK.
+        Dek fromCache = await sut.GetActiveDekAsync(Scope);
+        fromCache.KeyId.Should().Be(original.KeyId);
+        fromCache.Key.Should().Equal(original.Key);
+
+        // And even after a cache wipe, the store still resolves the old key.
+        cache.Remove($"vellum:dek:active:{Scope}");
+        Dek fromStore = await sut.GetActiveDekAsync(Scope);
+        fromStore.KeyId.Should().Be(original.KeyId);
+        fromStore.Key.Should().Equal(original.Key);
+    }
+
+    [Fact]
+    public async Task RotateDekAsync_Concurrent_GetActiveDek_NeverServesDeactivatedKeyAfterRotation()
+    {
+        // A3: the re-poisoning race. Old behaviour: a slow GetActiveDekAsync read that loaded
+        // the soon-to-be-deactivated key from the store could complete AFTER RotateDekAsync
+        // evicted the cache, re-caching the deactivated DEK — every encrypt then used a dead
+        // key until TTL expiry. The per-scope lock serialises the slow read and the rotation,
+        // and the rotation's _cache.Set overwrites whatever the slow read cached.
+        DekManager sut = BuildSut(
+            out FakeKeyEncryptionProvider provider,
+            out FakeEncryptionKeyStore store,
+            out _,
+            out _);
+
+        // Seed an active key that is NOT cached yet, so the first read takes the slow path.
+        byte[] oldPlaintext = new byte[32];
+        oldPlaintext[0] = 0x11;
+        WrappedKey oldWrapped = await provider.WrapAsync(oldPlaintext);
+        EncryptionKey oldKey = new(Guid.NewGuid(), Scope, oldWrapped, DateTimeOffset.UtcNow, null, true);
+        store.SeedKey(oldKey);
+
+        TaskCompletionSource readEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource readRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int pauses = 0;
+        store.GetActiveDelay = async _ =>
+        {
+            // One-shot gate: pause only the first slow read.
+            if (Interlocked.Increment(ref pauses) == 1)
+            {
+                readEntered.SetResult();
+                await readRelease.Task;
+            }
+        };
+
+        // 1. Slow read: takes the scope lock, then pauses inside the store read.
+        Task<Dek> slowRead = sut.GetActiveDekAsync(Scope).AsTask();
+        await readEntered.Task;
+
+        // 2. Rotation: queues on the scope lock — it cannot interleave with the slow read.
+        Task rotation = sut.RotateDekAsync(Scope);
+        rotation.IsCompleted.Should().BeFalse("the rotation must wait for the in-flight slow read");
+
+        // 3. Release the slow read; it caches the OLD key and releases the lock, then the
+        //    rotation runs and swaps in the NEW key.
+        readRelease.SetResult();
+        Dek stale = await slowRead;
+        stale.KeyId.Should().Be(oldKey.KeyId, "the slow read legitimately observed the pre-rotation key");
+        await rotation;
+
+        // 4. Post-rotation reads must serve the NEW key — never the deactivated one.
+        Dek current = await sut.GetActiveDekAsync(Scope);
+        current.KeyId.Should().NotBe(oldKey.KeyId, "the deactivated DEK must never be re-cached after rotation");
+        EncryptionKey? activeInStore = await store.GetActiveAsync(Scope);
+        current.KeyId.Should().Be(activeInStore!.KeyId);
+    }
+
+    [Fact]
+    public async Task GetActiveDekAsync_ConcurrentCacheMisses_SingleUnwrapCall()
+    {
+        // A3 anti-stampede: N concurrent cache misses on the same scope must collapse into a
+        // single store + KEK-provider round-trip. The first lock holder unwraps and caches;
+        // the other N-1 are answered by the double-check under the lock.
+        DekManager sut = BuildSut(
+            out FakeKeyEncryptionProvider provider,
+            out FakeEncryptionKeyStore store,
+            out _,
+            out _);
+
+        byte[] plaintext = new byte[32];
+        plaintext[0] = 0x42;
+        WrappedKey wrapped = await provider.WrapAsync(plaintext);
+        EncryptionKey seeded = new(Guid.NewGuid(), Scope, wrapped, DateTimeOffset.UtcNow, null, true);
+        store.SeedKey(seeded);
+        int wrapsAfterSeed = provider.WrapCalls;
+
+        const int parallelism = 20;
+        Task<Dek>[] tasks = Enumerable.Range(0, parallelism)
+            .Select(_ => Task.Run(async () => await sut.GetActiveDekAsync(Scope)))
+            .ToArray();
+        Dek[] results = await Task.WhenAll(tasks);
+
+        results.Select(dek => dek.KeyId).Distinct().Should().ContainSingle()
+            .Which.Should().Be(seeded.KeyId);
+        provider.UnwrapCalls.Should().Be(1, "20 concurrent misses must produce exactly one unwrap");
+        provider.WrapCalls.Should().Be(wrapsAfterSeed, "no new DEK may be wrapped");
+        store.CreateCalls.Should().Be(0, "no caller may attempt a redundant create");
+    }
+
+    [Fact]
+    public async Task GetActiveDekAsync_ConcurrentCacheMisses_EmptyScope_SingleCreateAndWrap()
+    {
+        // A3 anti-stampede, bootstrap variant: N concurrent misses on a scope with no key yet
+        // must produce at most one create and one wrap.
+        DekManager sut = BuildSut(
+            out FakeKeyEncryptionProvider provider,
+            out FakeEncryptionKeyStore store,
+            out _,
+            out _);
+
+        const int parallelism = 20;
+        Task<Dek>[] tasks = Enumerable.Range(0, parallelism)
+            .Select(_ => Task.Run(async () => await sut.GetActiveDekAsync(Scope)))
+            .ToArray();
+        Dek[] results = await Task.WhenAll(tasks);
+
+        results.Select(dek => dek.KeyId).Distinct().Should().ContainSingle();
+        store.CreateCalls.Should().Be(1, "exactly one caller may bootstrap the scope");
+        provider.WrapCalls.Should().Be(1, "exactly one DEK may be wrapped");
+        provider.UnwrapCalls.Should().Be(0, "the creator caches its own plaintext, no unwrap needed");
+    }
+
+    [Fact]
+    public async Task RotateDekAsync_ConcurrentRotations_SingleActiveKeyAtEnd()
+    {
+        DekManager sut = BuildSut(out _, out FakeEncryptionKeyStore store, out _, out _);
+
+        Dek initial = await sut.GetActiveDekAsync(Scope);
+
+        const int rotations = 8;
+        Task[] tasks = Enumerable.Range(0, rotations)
+            .Select(_ => Task.Run(async () => await sut.RotateDekAsync(Scope)))
+            .ToArray();
+        await Task.WhenAll(tasks);
+
+        IReadOnlyList<EncryptionKey> history = await store.GetHistoricalAsync(Scope);
+        history.Should().HaveCount(rotations + 1, "the initial key plus one per rotation");
+        EncryptionKey lastActive = history.Where(k => k.IsActive).Should().ContainSingle().Subject;
+        lastActive.KeyId.Should().NotBe(initial.KeyId);
+
+        // The cache must agree with the store: the served DEK is the single active key.
+        Dek current = await sut.GetActiveDekAsync(Scope);
+        current.KeyId.Should().Be(lastActive.KeyId);
+    }
+
+    [Fact]
+    public async Task RotateDekAsync_RaceLoss_UnwrapsAndCachesWinner()
+    {
+        // A2: when a concurrent rotation wins at the store, this rotation must zero its losing
+        // plaintext, unwrap the winner, and cache THAT.
+        _ = BuildSut(out FakeKeyEncryptionProvider provider, out _, out _, out _);
+
+        RaceStore raceStore = new();
+        MemoryCache cache = new(new MemoryCacheOptions());
+        DekManager racingSut = new(
+            provider,
+            raceStore,
+            cache,
+            new CountingRandomBytesProvider(),
+            TimeProvider.System,
+            Options.Create(new VellumOptions()),
+            NullLogger<DekManager>.Instance);
+
+        byte[] winnerPlaintext = new byte[32];
+        winnerPlaintext[0] = 0xAB;
+        WrappedKey winnerWrapped = await provider.WrapAsync(winnerPlaintext);
+        raceStore.InjectRaceWinner(new EncryptionKey(
+            Guid.NewGuid(), Scope, winnerWrapped, DateTimeOffset.UtcNow, null, true));
+
+        await racingSut.RotateDekAsync(Scope);
+
+        Dek current = await racingSut.GetActiveDekAsync(Scope);
+        current.KeyId.Should().Be(raceStore.WinnerKeyId);
+        current.Key[0].Should().Be(0xAB, "the cached DEK must be the winner's plaintext");
+    }
+
+    [Fact]
+    public async Task CreateDekAsync_RaceLossWinnerWrongLength_FailsClosed()
+    {
+        // A4: the create race-loss path previously cached the winner's unwrapped bytes WITHOUT
+        // EnsureDekLength — the only unwrap path missing the AES-256 length guard. A buggy or
+        // compromised KEK provider returning short winner bytes must fail closed.
+        _ = BuildSut(out FakeKeyEncryptionProvider provider, out _, out _, out _);
+
+        RaceStore raceStore = new();
+        DekManager racingSut = new(
+            provider,
+            raceStore,
+            new MemoryCache(new MemoryCacheOptions()),
+            new CountingRandomBytesProvider(),
+            TimeProvider.System,
+            Options.Create(new VellumOptions()),
+            NullLogger<DekManager>.Instance);
+
+        WrappedKey shortWrapped = await provider.WrapAsync(new byte[16]);
+        raceStore.InjectRaceWinner(new EncryptionKey(
+            Guid.NewGuid(), Scope, shortWrapped, DateTimeOffset.UtcNow, null, true));
+
+        Func<Task> act = async () => await racingSut.CreateDekAsync(Scope);
+        await act.Should().ThrowAsync<CryptographicException>()
+            .WithMessage("*expected 32 bytes*");
+    }
+
+    [Fact]
+    public async Task RotateDekAsync_RaceLossWinnerWrongLength_FailsClosed()
+    {
+        // A4 symmetry on the rotation race-loss path.
+        _ = BuildSut(out FakeKeyEncryptionProvider provider, out _, out _, out _);
+
+        RaceStore raceStore = new();
+        DekManager racingSut = new(
+            provider,
+            raceStore,
+            new MemoryCache(new MemoryCacheOptions()),
+            new CountingRandomBytesProvider(),
+            TimeProvider.System,
+            Options.Create(new VellumOptions()),
+            NullLogger<DekManager>.Instance);
+
+        WrappedKey shortWrapped = await provider.WrapAsync(new byte[24]);
+        raceStore.InjectRaceWinner(new EncryptionKey(
+            Guid.NewGuid(), Scope, shortWrapped, DateTimeOffset.UtcNow, null, true));
+
+        Func<Task> act = async () => await racingSut.RotateDekAsync(Scope);
+        await act.Should().ThrowAsync<CryptographicException>()
+            .WithMessage("*expected 32 bytes*");
     }
 
     [Fact]
@@ -588,6 +861,25 @@ public sealed class DekManagerTests
             .WithMessage("*expected 32 bytes*");
     }
 
+    /// <summary>
+    /// Delegating provider whose <see cref="WrapAsync"/> can be toggled to fail, simulating a
+    /// KEK provider (Vault/KMS) outage during rotation while unwrap keeps working.
+    /// </summary>
+    private sealed class FailingWrapProvider(FakeKeyEncryptionProvider inner) : IKeyEncryptionProvider
+    {
+        public bool FailWraps { get; set; }
+
+        public string ProviderName => "failing-fake";
+
+        public Task<WrappedKey> WrapAsync(ReadOnlyMemory<byte> dek, CancellationToken cancellationToken = default)
+            => FailWraps
+                ? Task.FromException<WrappedKey>(new InvalidOperationException("KEK provider unavailable (simulated outage)."))
+                : inner.WrapAsync(dek, cancellationToken);
+
+        public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+            => inner.UnwrapAsync(wrappedKey, cancellationToken);
+    }
+
     private sealed class ShortDekProvider(int dekBytesLength) : IKeyEncryptionProvider
     {
         public string ProviderName => "short-fake";
@@ -633,6 +925,9 @@ public sealed class DekManagerTests
 
         public Task DeactivateAllAsync(string scope, CancellationToken cancellationToken = default)
             => Task.CompletedTask;
+
+        public Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default)
+            => Task.FromResult(_winner ?? newKey);
 
         public Task<IReadOnlyList<EncryptionKey>> GetHistoricalAsync(string scope, CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<EncryptionKey>>(Array.Empty<EncryptionKey>());

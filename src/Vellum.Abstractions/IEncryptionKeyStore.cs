@@ -71,11 +71,52 @@ public interface IEncryptionKeyStore
     /// Marks all keys for the given scope as inactive.
     /// </summary>
     /// <remarks>
-    /// Used during key rotation, immediately before creating a new active key.
+    /// <b>Not suitable for rotation on its own.</b> Deactivating and then creating in two separate
+    /// calls opens a window during which the scope has zero active keys — if the process crashes or
+    /// the KEK provider fails between the two calls, all encrypt operations for the scope fail until
+    /// a new key is created. Use <see cref="RotateAsync(EncryptionKey, CancellationToken)"/> for
+    /// rotation; this method remains for administrative revocation scenarios where "no active key"
+    /// is the intended end state.
     /// </remarks>
     /// <param name="scope">Opaque scope identifier.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     public Task DeactivateAllAsync(string scope, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically deactivates all currently-active keys for <see cref="EncryptionKey.Scope"/> of
+    /// <paramref name="newKey"/> <b>and</b> inserts <paramref name="newKey"/> as the new active key,
+    /// in a single transaction.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Atomicity.</b> The deactivation of the old keys and the insertion of the new key must
+    /// commit together or not at all. On failure nothing changes: the previously-active key stays
+    /// active and the scope is never observed with zero active keys. This is the fail-safe
+    /// foundation for DEK rotation — see the production incident where a two-step
+    /// deactivate-then-create rotation left scopes without any active DEK when the KEK provider
+    /// failed mid-rotation.
+    /// </para>
+    /// <para>
+    /// <b>Race handling.</b> If a concurrent rotation commits first and the insertion of
+    /// <paramref name="newKey"/> trips the one-active-key-per-scope unique constraint,
+    /// implementations should return the concurrent winner (the key that is now active for the
+    /// scope) instead of throwing, mirroring the <see cref="CreateAsync(EncryptionKey, CancellationToken)"/>
+    /// contract. If the failure is <b>not</b> a rotation race (no fresh winner can be identified),
+    /// implementations must throw — never silently leave the rotation half-applied.
+    /// </para>
+    /// <para>
+    /// <paramref name="newKey"/> must carry <see cref="EncryptionKey.IsActive"/> =
+    /// <see langword="true"/>; implementations reject an inactive key fail-closed because inserting
+    /// it would end the transaction with zero active keys for the scope.
+    /// </para>
+    /// </remarks>
+    /// <param name="newKey">The new active key to install. <see cref="EncryptionKey.IsActive"/> must be <see langword="true"/>.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>
+    /// The persisted active key: <paramref name="newKey"/> itself when this call won, or the
+    /// concurrent winner when another rotation raced ahead.
+    /// </returns>
+    public Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Returns all keys (active and historical) for the given scope, ordered from most recent to oldest.

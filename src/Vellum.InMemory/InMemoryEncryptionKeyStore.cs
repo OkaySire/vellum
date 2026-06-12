@@ -136,6 +136,40 @@ public sealed partial class InMemoryEncryptionKeyStore : IEncryptionKeyStore
     }
 
     /// <inheritdoc />
+    public Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(newKey);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!newKey.IsActive)
+        {
+            throw new ArgumentException(
+                $"RotateAsync requires an active key (IsActive = true); installing an inactive key would leave scope '{newKey.Scope}' with zero active keys.",
+                nameof(newKey));
+        }
+
+        // Atomic swap under the global write lock: deactivate every active key for the scope and
+        // install the new active key in one critical section. In-memory mutations cannot fail
+        // half-way, so this call always wins — concurrent rotations simply serialise, each
+        // installing its key as the new active one.
+        lock (_writeLock)
+        {
+            foreach (KeyValuePair<Guid, EncryptionKey> entry in _keysById.ToArray())
+            {
+                EncryptionKey current = entry.Value;
+                if (current.IsActive && string.Equals(current.Scope, newKey.Scope, StringComparison.Ordinal))
+                {
+                    _keysById[entry.Key] = current with { IsActive = false };
+                }
+            }
+
+            _keysById[newKey.KeyId] = newKey;
+        }
+
+        return Task.FromResult(newKey);
+    }
+
+    /// <inheritdoc />
     public Task DeactivateAllAsync(string scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
