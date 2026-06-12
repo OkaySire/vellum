@@ -53,4 +53,27 @@ public sealed class VaultOptions
     /// geographically distant; prefer retries orchestrated by the caller over unbounded timeouts.
     /// </remarks>
     public TimeSpan HttpTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Gets or sets a value indicating whether a plain <c>http://</c> <see cref="Address"/> is
+    /// permitted. Defaults to <see langword="false"/>: an <c>http://</c> address fails validation
+    /// and the host refuses to start.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>DANGER — never enable this in production.</b> Over plain HTTP, every Vault Transit
+    /// request transmits the <see cref="Token"/> (<c>X-Vault-Token</c> header) <b>and</b> the
+    /// base64-encoded plaintext DEK (encrypt request body / decrypt response body) in cleartext.
+    /// Anyone on the network path can capture the token and every data encryption key, defeating
+    /// envelope encryption entirely.
+    /// </para>
+    /// <para>
+    /// The only legitimate use is local development against an ephemeral dev server
+    /// (<c>vault server -dev</c> on <c>127.0.0.1</c>). When enabled with an <c>http://</c>
+    /// address, Vellum logs a <see cref="Microsoft.Extensions.Logging.LogLevel.Warning"/> each
+    /// time a Vault <see cref="HttpClient"/> is constructed so the insecure configuration is
+    /// impossible to miss in logs.
+    /// </para>
+    /// </remarks>
+    public bool AllowInsecureHttp { get; set; }
 }

@@ -1,7 +1,9 @@
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Vellum.Vault.Tests.Fakes;
 using Xunit;
 
 namespace Vellum.Vault.Tests;
@@ -211,6 +213,192 @@ public sealed class VaultServiceCollectionExtensionsTests
         IKeyEncryptionProvider provider = sp.GetRequiredService<IKeyEncryptionProvider>();
 
         provider.Should().BeOfType<NoopProvider>("because TryAddTransient must not override an earlier explicit registration");
+    }
+
+    [Fact]
+    public void AddVaultProvider_HttpAddressWithoutAllowInsecureHttp_ThrowsOnValidation()
+    {
+        // H-A: plain http:// transmits the Vault token and plaintext DEKs in cleartext, so it
+        // must fail closed unless the consumer explicitly opts in.
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddVaultProvider(opts =>
+        {
+            opts.Address = "http://vault.example:8200";
+            opts.Token = "hvs.abc";
+            opts.KeyName = "my-kek";
+        });
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+        IOptions<VaultOptions> options = sp.GetRequiredService<IOptions<VaultOptions>>();
+
+        Action act = () => _ = options.Value;
+
+        act.Should().Throw<OptionsValidationException>()
+            .Where(ex => ex.Failures.Any(f => f.Contains("AllowInsecureHttp", StringComparison.Ordinal)
+                                              && f.Contains("cleartext", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void AddVaultProvider_HttpAddressWithAllowInsecureHttp_ResolvesProvider()
+    {
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddVaultProvider(opts =>
+        {
+            opts.Address = "http://127.0.0.1:8200";
+            opts.Token = "hvs.dev";
+            opts.KeyName = "my-kek";
+            opts.AllowInsecureHttp = true;
+        });
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+        IKeyEncryptionProvider provider = sp.GetRequiredService<IKeyEncryptionProvider>();
+
+        provider.Should().BeOfType<VaultKeyEncryptionProvider>();
+    }
+
+    [Fact]
+    public void AddVaultProvider_HttpsAddressWithoutAllowInsecureHttp_PassesValidation()
+    {
+        // https never requires the opt-in flag.
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddVaultProvider(opts =>
+        {
+            opts.Address = "https://vault.example:8200";
+            opts.Token = "hvs.abc";
+            opts.KeyName = "my-kek";
+        });
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+        IOptions<VaultOptions> options = sp.GetRequiredService<IOptions<VaultOptions>>();
+
+        Action act = () => _ = options.Value;
+
+        act.Should().NotThrow();
+        options.Value.AllowInsecureHttp.Should().BeFalse();
+    }
+
+    [Fact]
+    public void AddVaultProvider_HttpAddressWithoutAllowInsecureHttp_FailsAtStartupValidation()
+    {
+        // L20 pattern: ValidateOnStart() registers IStartupValidator — exactly what the host
+        // invokes at start-up — so we can assert fail-fast behaviour without a Host.
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddVaultProvider(opts =>
+        {
+            opts.Address = "http://vault.example:8200";
+            opts.Token = "hvs.abc";
+            opts.KeyName = "my-kek";
+        });
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+        IStartupValidator startupValidator = sp.GetRequiredService<IStartupValidator>();
+
+        Action act = startupValidator.Validate;
+
+        act.Should().Throw<OptionsValidationException>()
+            .Where(ex => ex.Failures.Any(f => f.Contains("AllowInsecureHttp", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void AddVaultProvider_InsecureHttpEnabled_LogsWarningWithoutToken()
+    {
+        // H-A: opting into plain http must produce a loud Warning when the Vault HttpClient is
+        // constructed — and the warning must never include the token value.
+        ServiceCollection services = new();
+        services.AddLogging();
+        CapturingLogger<VaultKeyEncryptionProvider> capturingLogger = new();
+        services.AddSingleton<ILogger<VaultKeyEncryptionProvider>>(capturingLogger);
+        services.AddVaultProvider(opts =>
+        {
+            opts.Address = "http://127.0.0.1:8200";
+            opts.Token = "hvs.supersecret";
+            opts.KeyName = "my-kek";
+            opts.AllowInsecureHttp = true;
+        });
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+        IHttpClientFactory factory = sp.GetRequiredService<IHttpClientFactory>();
+        _ = factory.CreateClient(nameof(VaultKeyEncryptionProvider));
+
+        CapturedLogEntry warning = capturingLogger.Entries
+            .Should().ContainSingle(e => e.Level == LogLevel.Warning).Which;
+        warning.Message.Should().Contain("http://", "the warning must spell out the insecure scheme");
+        warning.Message.Should().Contain("127.0.0.1", "the warning identifies the insecure host");
+        warning.Message.Should().NotContain("hvs.supersecret", "the token must never be logged");
+    }
+
+    [Fact]
+    public void AddVaultProvider_HttpsAddress_DoesNotLogInsecureWarning()
+    {
+        ServiceCollection services = new();
+        services.AddLogging();
+        CapturingLogger<VaultKeyEncryptionProvider> capturingLogger = new();
+        services.AddSingleton<ILogger<VaultKeyEncryptionProvider>>(capturingLogger);
+        services.AddVaultProvider(opts =>
+        {
+            opts.Address = "https://vault.example:8200";
+            opts.Token = "hvs.abc";
+            opts.KeyName = "my-kek";
+        });
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+        IHttpClientFactory factory = sp.GetRequiredService<IHttpClientFactory>();
+        _ = factory.CreateClient(nameof(VaultKeyEncryptionProvider));
+
+        capturingLogger.Entries.Should().NotContain(e => e.Level == LogLevel.Warning);
+    }
+
+    [Fact]
+    public void AddVaultProvider_RedactsVaultTokenHeader_InHttpClientFactoryLogs()
+    {
+        // H-B: the default IHttpClientFactory logging handlers log all request headers at Trace
+        // level. RedactLoggedHeaders wires HttpClientFactoryOptions.ShouldRedactHeaderValue so
+        // the X-Vault-Token value is replaced before it ever reaches a log sink.
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddVaultProvider(opts =>
+        {
+            opts.Address = "https://vault.example:8200";
+            opts.Token = "hvs.abc";
+            opts.KeyName = "my-kek";
+        });
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+        IOptionsMonitor<HttpClientFactoryOptions> monitor =
+            sp.GetRequiredService<IOptionsMonitor<HttpClientFactoryOptions>>();
+        HttpClientFactoryOptions factoryOptions = monitor.Get(nameof(VaultKeyEncryptionProvider));
+
+        factoryOptions.ShouldRedactHeaderValue("X-Vault-Token")
+            .Should().BeTrue("the Vault token header must be redacted from HttpClientFactory logs");
+        factoryOptions.ShouldRedactHeaderValue("x-vault-token")
+            .Should().BeTrue("header-name matching must be case-insensitive");
+        factoryOptions.ShouldRedactHeaderValue("Accept")
+            .Should().BeFalse("only the token header is sensitive");
+    }
+
+    [Fact]
+    public void AddVaultProvider_CapsMaxResponseContentBufferSize_At64KiB()
+    {
+        // M-E: a malicious Vault returning a multi-gigabyte error body must hit the buffering
+        // cap (HttpRequestException, fail closed) instead of forcing unbounded allocations.
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddVaultProvider(opts =>
+        {
+            opts.Address = "https://vault.example:8200";
+            opts.Token = "hvs.abc";
+            opts.KeyName = "my-kek";
+        });
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+        IHttpClientFactory factory = sp.GetRequiredService<IHttpClientFactory>();
+        HttpClient httpClient = factory.CreateClient(nameof(VaultKeyEncryptionProvider));
+
+        httpClient.MaxResponseContentBufferSize.Should().Be(64 * 1024);
     }
 
     private sealed class NoopProvider : IKeyEncryptionProvider

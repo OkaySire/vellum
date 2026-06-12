@@ -29,6 +29,18 @@ internal sealed class VaultOptionsValidator : IValidateOptions<VaultOptions>
             string safeEcho = ScrubUserInfo(options.Address);
             failures.Add($"{nameof(VaultOptions.Address)} ('{safeEcho}') must be an absolute http:// or https:// URI.");
         }
+        else if (parsed.Scheme == Uri.UriSchemeHttp && !options.AllowInsecureHttp)
+        {
+            // H-A: plain http:// transmits the X-Vault-Token header and the base64-encoded
+            // plaintext DEKs (encrypt request body / decrypt response body) in cleartext.
+            // Fail closed unless the consumer explicitly opts in for local development.
+            string safeEcho = ScrubUserInfo(options.Address);
+            failures.Add(
+                $"{nameof(VaultOptions.Address)} ('{safeEcho}') uses plain http://, which would transmit " +
+                $"the Vault token and plaintext DEKs in cleartext. Use https://, or set " +
+                $"{nameof(VaultOptions.AllowInsecureHttp)} = true for local development only " +
+                "(e.g. against 'vault server -dev').");
+        }
 
         if (string.IsNullOrWhiteSpace(options.Token))
         {
