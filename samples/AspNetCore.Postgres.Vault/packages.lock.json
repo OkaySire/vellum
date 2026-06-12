@@ -133,6 +133,12 @@
           "Vellum.Abstractions": "[0.2.0, )"
         }
       },
+      "vellum.rotation": {
+        "type": "Project",
+        "dependencies": {
+          "Vellum.Abstractions": "[0.2.0, )"
+        }
+      },
       "vellum.vault": {
         "type": "Project",
         "dependencies": {
@@ -259,6 +265,14 @@
         "resolved": "9.9.0",
         "contentHash": "LVb1ziRqI8x8TNCJW+zRGx1xPTPFWbhJzEk8k+rFx03M8zrQt5T+3MMV/fWTeHc3/7uoJDRDRklRMUlAqQw99w=="
       },
+      "Microsoft.Extensions.FileProviders.Abstractions": {
+        "type": "Transitive",
+        "resolved": "9.0.9",
+        "contentHash": "M1ZhL9QkBQ/k6l/Wjgcli5zrV86HzytQ+gQiNtk9vs9Ge1fb17KKZil9T6jd15p2x/BGfXpup7Hg55CC0kkfig==",
+        "dependencies": {
+          "Microsoft.Extensions.Primitives": "9.0.9"
+        }
+      },
       "Microsoft.Extensions.Http.Diagnostics": {
         "type": "Transitive",
         "resolved": "9.9.0",
@@ -356,6 +370,16 @@
           "Vellum.Abstractions": "[0.2.0, )"
         }
       },
+      "vellum.rotation": {
+        "type": "Project",
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
+          "Microsoft.Extensions.Hosting.Abstractions": "[9.0.9, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
+          "Microsoft.Extensions.Options": "[9.0.9, )",
+          "Vellum.Abstractions": "[0.2.0, )"
+        }
+      },
       "vellum.vault": {
         "type": "Project",
         "dependencies": {
@@ -415,6 +439,19 @@
         "requested": "[9.0.9, )",
         "resolved": "9.0.9",
         "contentHash": "/hymojfWbE9AlDOa0mczR44m00Jj+T3+HZO0ZnVTI032fVycI0ZbNOVFP6kqZMcXiLSYXzR2ilcwaRi6dzeGyA=="
+      },
+      "Microsoft.Extensions.Hosting.Abstractions": {
+        "type": "CentralTransitive",
+        "requested": "[9.0.9, )",
+        "resolved": "9.0.9",
+        "contentHash": "ORA4dICNz7cuwupPkjXpSuoiK6GMg0aygInBIQCCFEimwoHntRKdJqB59faxq2HHJuTPW3NsZm5EjN5P5Zh6nQ==",
+        "dependencies": {
+          "Microsoft.Extensions.Configuration.Abstractions": "9.0.9",
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "9.0.9",
+          "Microsoft.Extensions.Diagnostics.Abstractions": "9.0.9",
+          "Microsoft.Extensions.FileProviders.Abstractions": "9.0.9",
+          "Microsoft.Extensions.Logging.Abstractions": "9.0.9"
+        }
       },
       "Microsoft.Extensions.Http": {
         "type": "CentralTransitive",
@@ -614,6 +651,12 @@
         "dependencies": {
           "Microsoft.EntityFrameworkCore": "[9.0.9, )",
           "Microsoft.EntityFrameworkCore.Relational": "[9.0.9, )",
+          "Vellum.Abstractions": "[0.2.0, )"
+        }
+      },
+      "vellum.rotation": {
+        "type": "Project",
+        "dependencies": {
           "Vellum.Abstractions": "[0.2.0, )"
         }
       },

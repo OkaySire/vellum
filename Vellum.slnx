@@ -19,6 +19,7 @@
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Console.Static/Console.Static.csproj" />
+    <Project Path="samples/RotationAndRewrap/RotationAndRewrap.csproj" />
     <Project Path="samples/FeatureFlagged/FeatureFlagged.csproj" />
     <Project Path="samples/AspNetCore.Postgres.Vault/AspNetCore.Postgres.Vault.csproj" />
   </Folder>
