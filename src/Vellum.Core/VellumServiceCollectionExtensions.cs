@@ -9,7 +9,8 @@ namespace Vellum;
 /// <remarks>
 /// <para>
 /// <see cref="AddVellum"/> wires up <see cref="IDekManager"/>, <see cref="IPayloadEncryptor"/>,
-/// <see cref="IRandomBytesProvider"/> and <see cref="TimeProvider"/> — plus the Vellum-owned
+/// <see cref="VellumRewrapService"/>, <see cref="IRandomBytesProvider"/> and
+/// <see cref="TimeProvider"/> — plus the Vellum-owned
 /// <see cref="VellumDekCache"/> used on the hot path. It deliberately does <b>not</b> register
 /// or touch the application's shared <c>IMemoryCache</c>: plaintext DEKs live in a dedicated
 /// cache that only Vellum can reach (M-C). It also does <b>not</b> register an
@@ -59,6 +60,7 @@ public static class VellumServiceCollectionExtensions
         // (which typically depend on a scoped DbContext) are not captured by a singleton.
         services.TryAddScoped<IDekManager, DekManager>();
         services.TryAddScoped<IPayloadEncryptor, PayloadEncryptor>();
+        services.TryAddScoped<VellumRewrapService>();
 
         return services;
     }

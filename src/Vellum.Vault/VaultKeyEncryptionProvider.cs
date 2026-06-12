@@ -18,6 +18,7 @@ namespace Vellum.Vault;
 /// <list type="bullet">
 ///   <item><description><c>POST /v1/transit/encrypt/{key}</c> — wraps a DEK, returns <c>vault:v{N}:…</c>.</description></item>
 ///   <item><description><c>POST /v1/transit/decrypt/{key}</c> — unwraps a previously-wrapped DEK.</description></item>
+///   <item><description><c>POST /v1/transit/rewrap/{key}</c> — re-encrypts a wrapped DEK under the latest key version, entirely inside Vault.</description></item>
 /// </list>
 /// <para>
 /// <b>Provider version.</b> The version segment of the Vault ciphertext (e.g. <c>v1</c>, <c>v2</c>)
@@ -172,6 +173,72 @@ public sealed partial class VaultKeyEncryptionProvider(
         return dekBytes;
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Delegates to Vault Transit's native <c>POST /v1/transit/rewrap/{key}</c> endpoint: the
+    /// plaintext DEK never leaves Vault. The returned ciphertext is wrapped under the latest
+    /// key version, whose <c>v{N}</c> segment is extracted into
+    /// <see cref="WrappedKey.ProviderVersion"/> exactly like <see cref="WrapAsync(ReadOnlyMemory{byte}, CancellationToken)"/>.
+    /// </remarks>
+    public async Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(wrappedKey);
+
+        if (string.IsNullOrEmpty(wrappedKey.Ciphertext))
+        {
+            throw new ArgumentException("WrappedKey.Ciphertext must not be null or empty.", nameof(wrappedKey));
+        }
+
+        // Sanity-check the format before we even make the HTTP call — fail fast, fail closed
+        // (mirrors UnwrapAsync).
+        if (!wrappedKey.Ciphertext.StartsWith(_vaultCiphertextPrefix, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"WrappedKey.Ciphertext does not start with '{_vaultCiphertextPrefix}'; this provider only rewraps Vault-formatted ciphertexts.");
+        }
+
+        VaultRewrapRequest requestDto = new(wrappedKey.Ciphertext);
+        using JsonContent content = JsonContent.Create(requestDto, VaultJsonContext.Default.VaultRewrapRequest);
+        string relativePath = BuildTransitPath("rewrap");
+
+        using HttpResponseMessage response = await _httpClient
+            .PostAsync(new Uri(relativePath, UriKind.Relative), content, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            string errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            string truncatedBody = VaultDiagnostics.TruncateForDiagnostics(errorBody);
+            LogVaultError(_logger, "rewrap", (int)response.StatusCode, truncatedBody);
+            throw new InvalidOperationException(
+                $"Vault Transit rewrap failed with HTTP {(int)response.StatusCode} ({response.StatusCode}): {truncatedBody}");
+        }
+
+        VaultRewrapResponse? parsed;
+        try
+        {
+            parsed = await response.Content
+                .ReadFromJsonAsync(VaultJsonContext.Default.VaultRewrapResponse, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (JsonException ex)
+        {
+            LogJsonParseFailed(_logger, "rewrap", ex.Message);
+            throw;
+        }
+
+        string? ciphertext = parsed?.Data?.Ciphertext;
+        if (string.IsNullOrEmpty(ciphertext))
+        {
+            throw new InvalidOperationException("Vault Transit rewrap returned a null or empty ciphertext.");
+        }
+
+        string providerVersion = ExtractProviderVersion(ciphertext);
+
+        LogRewrapSucceeded(_logger, _options.KeyName, wrappedKey.ProviderVersion, providerVersion);
+        return new WrappedKey(ciphertext, providerVersion);
+    }
+
     /// <summary>
     /// Builds the relative transit-engine URL for a given operation, URL-encoding the key name
     /// so that names with reserved characters are transmitted safely.
@@ -240,4 +307,12 @@ public sealed partial class VaultKeyEncryptionProvider(
         Level = LogLevel.Error,
         Message = "Vault Transit {Operation} response JSON could not be parsed: {ErrorMessage}")]
     private static partial void LogJsonParseFailed(ILogger logger, string operation, string errorMessage);
+
+    // EventId 6, not 5: EventId 5 on this logger category is the AllowInsecureHttp warning
+    // emitted by VaultServiceCollectionExtensions (which continues this class's sequence).
+    [LoggerMessage(
+        EventId = 6,
+        Level = LogLevel.Debug,
+        Message = "Vault Transit rewrap succeeded for key {KeyName} (provider version {OldProviderVersion} -> {NewProviderVersion}).")]
+    private static partial void LogRewrapSucceeded(ILogger logger, string keyName, string oldProviderVersion, string newProviderVersion);
 }

@@ -119,6 +119,44 @@ public interface IEncryptionKeyStore
     public Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Replaces the wrapped key material of an existing key (active <b>or</b> historical)
+    /// identified by <paramref name="keyId"/> and <paramref name="scope"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Used by KEK rewrap tooling (see <c>VellumRewrapService</c> in <c>Vellum.Core</c>): after
+    /// the KEK is rotated, stored wrapped DEKs are re-encrypted under the current KEK version via
+    /// <see cref="IKeyEncryptionProvider.RewrapAsync(WrappedKey, CancellationToken)"/> and the
+    /// refreshed material is persisted through this method.
+    /// </para>
+    /// <para>
+    /// <b>Immutability.</b> Only the wrapped material (<see cref="EncryptionKey.WrappedKey"/>:
+    /// ciphertext and provider version) changes. <see cref="EncryptionKey.KeyId"/>,
+    /// <see cref="EncryptionKey.Scope"/>, <see cref="EncryptionKey.CreatedAt"/>,
+    /// <see cref="EncryptionKey.ExpiresAt"/> and <see cref="EncryptionKey.IsActive"/> are
+    /// preserved verbatim — rewrapping never changes a key's identity or lifecycle state.
+    /// </para>
+    /// <para>
+    /// <b>Multi-tenant defense (M1).</b> <paramref name="scope"/> is required and must match the
+    /// persisted key's scope, mirroring <see cref="GetByIdAsync(Guid, string, CancellationToken)"/> —
+    /// a caller cannot overwrite another tenant's wrapped DEK by guessing a <see cref="Guid"/>.
+    /// </para>
+    /// <para>
+    /// <b>Fail closed.</b> A missing key or a scope mismatch throws
+    /// <see cref="InvalidOperationException"/>. Implementations must never silently no-op: a
+    /// rewrap sweep that "succeeds" without persisting anything would leave the operator believing
+    /// the old KEK version is retired while data still depends on it.
+    /// </para>
+    /// </remarks>
+    /// <param name="keyId">The identifier of the key to update.</param>
+    /// <param name="scope">Opaque scope identifier that must match the persisted key's scope.</param>
+    /// <param name="newWrappedKey">The new wrapped key material, as returned by <see cref="IKeyEncryptionProvider.RewrapAsync(WrappedKey, CancellationToken)"/>.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The updated key, carrying <paramref name="newWrappedKey"/> and otherwise-unchanged fields.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when no key with <paramref name="keyId"/> exists or its scope does not match <paramref name="scope"/>.</exception>
+    public Task<EncryptionKey> UpdateWrappedKeyAsync(Guid keyId, string scope, WrappedKey newWrappedKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Returns all keys (active and historical) for the given scope, ordered from most recent to oldest.
     /// </summary>
     /// <param name="scope">Opaque scope identifier.</param>

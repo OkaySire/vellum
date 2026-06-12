@@ -78,6 +78,69 @@ public sealed class StaticKeyEncryptionProviderTests
         (await provider.UnwrapAsync(second)).Should().Equal(dek);
     }
 
+    // ---------- RewrapAsync (H1) ----------
+
+    [Fact]
+    public async Task RewrapAsync_Roundtrip_UnwrapsToOriginalDek()
+    {
+        StaticKeyEncryptionProvider provider = CreateProvider();
+        byte[] dek = RandomNumberGenerator.GetBytes(32);
+
+        WrappedKey wrapped = await provider.WrapAsync(dek);
+        WrappedKey rewrapped = await provider.RewrapAsync(wrapped);
+        byte[] unwrapped = await provider.UnwrapAsync(rewrapped);
+
+        unwrapped.Should().Equal(dek);
+        rewrapped.ProviderVersion.Should().Be("v1");
+        rewrapped.Ciphertext.Should().StartWith("static:v1:");
+    }
+
+    [Fact]
+    public async Task RewrapAsync_OutputDiffersFromInputCiphertext()
+    {
+        // The rewrap uses a fresh random nonce, so even for the same DEK and KEK the
+        // resulting blob must differ — identical output would mean nonce reuse.
+        StaticKeyEncryptionProvider provider = CreateProvider();
+        byte[] dek = RandomNumberGenerator.GetBytes(32);
+
+        WrappedKey wrapped = await provider.WrapAsync(dek);
+        WrappedKey rewrapped = await provider.RewrapAsync(wrapped);
+
+        rewrapped.Ciphertext.Should().NotBe(wrapped.Ciphertext);
+
+        // The original wrapped key remains valid — rewrap never invalidates the input.
+        (await provider.UnwrapAsync(wrapped)).Should().Equal(dek);
+    }
+
+    [Fact]
+    public async Task RewrapAsync_WrongPrefix_Throws()
+    {
+        StaticKeyEncryptionProvider provider = CreateProvider();
+
+        Func<Task> act = async () => await provider.RewrapAsync(new WrappedKey("vault:v1:abc==", "v1"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task RewrapAsync_TamperedCiphertext_FailsClosed()
+    {
+        // The internal unwrap step authenticates the blob via the AES-GCM tag — a tampered
+        // wrapped DEK must throw rather than be silently re-wrapped (which would launder a
+        // corrupted key into a fresh-looking ciphertext).
+        StaticKeyEncryptionProvider provider = CreateProvider();
+        byte[] dek = RandomNumberGenerator.GetBytes(32);
+        WrappedKey wrapped = await provider.WrapAsync(dek);
+
+        byte[] blob = Convert.FromBase64String(wrapped.Ciphertext["static:v1:".Length..]);
+        blob[^1] ^= 0xFF; // flip a tag bit
+        WrappedKey tampered = new("static:v1:" + Convert.ToBase64String(blob), wrapped.ProviderVersion);
+
+        Func<Task> act = async () => await provider.RewrapAsync(tampered);
+
+        await act.Should().ThrowAsync<CryptographicException>();
+    }
+
     [Fact]
     public async Task UnwrapAsync_TamperedCiphertext_ThrowsCryptographicException()
     {

@@ -19,6 +19,8 @@ public sealed class FakeEncryptionKeyStore : IEncryptionKeyStore
 
     public int RotateCalls { get; private set; }
 
+    public int UpdateWrappedKeyCalls { get; private set; }
+
     /// <summary>
     /// Test hook: when set, awaited at the start of <see cref="GetActiveAsync"/> (before the
     /// store is consulted). Lets tests pause an in-flight slow read at a precise point to
@@ -124,6 +126,27 @@ public sealed class FakeEncryptionKeyStore : IEncryptionKeyStore
         }
 
         return Task.CompletedTask;
+    }
+
+    public Task<EncryptionKey> UpdateWrappedKeyAsync(Guid keyId, string scope, WrappedKey newWrappedKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(newWrappedKey);
+        UpdateWrappedKeyCalls++;
+
+        lock (_lock)
+        {
+            if (!_byId.TryGetValue(keyId, out EncryptionKey? existing)
+                || !string.Equals(existing.Scope, scope, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Encryption key {keyId} not found for scope '{scope}'; the wrapped key material was not updated.");
+            }
+
+            EncryptionKey updated = existing with { WrappedKey = newWrappedKey };
+            _byId[keyId] = updated;
+            return Task.FromResult(updated);
+        }
     }
 
     public Task<IReadOnlyList<EncryptionKey>> GetHistoricalAsync(string scope, CancellationToken cancellationToken = default)

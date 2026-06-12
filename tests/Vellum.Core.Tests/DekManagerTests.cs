@@ -866,6 +866,9 @@ public sealed class DekManagerTests
 
         public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
             => inner.UnwrapAsync(wrappedKey, cancellationToken);
+
+        public Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+            => inner.RewrapAsync(wrappedKey, cancellationToken);
     }
 
     /// <summary>
@@ -889,6 +892,9 @@ public sealed class DekManagerTests
             UnwrappedArrays.Add(bytes);
             return bytes;
         }
+
+        public Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+            => _inner.RewrapAsync(wrappedKey, cancellationToken);
     }
 
     private sealed class ShortDekProvider(int dekBytesLength) : IKeyEncryptionProvider
@@ -900,6 +906,9 @@ public sealed class DekManagerTests
 
         public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
             => Task.FromResult(new byte[dekBytesLength]);
+
+        public Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Not used by these tests.");
     }
 
     /// <summary>
@@ -939,6 +948,9 @@ public sealed class DekManagerTests
 
         public Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default)
             => Task.FromResult(_winner ?? newKey);
+
+        public Task<EncryptionKey> UpdateWrappedKeyAsync(Guid keyId, string scope, WrappedKey newWrappedKey, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Not used by these tests.");
 
         public Task<IReadOnlyList<EncryptionKey>> GetHistoricalAsync(string scope, CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<EncryptionKey>>(Array.Empty<EncryptionKey>());

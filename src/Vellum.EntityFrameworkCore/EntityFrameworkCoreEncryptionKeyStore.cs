@@ -232,6 +232,45 @@ public sealed partial class EntityFrameworkCoreEncryptionKeyStore<TContext>(
     }
 
     /// <inheritdoc />
+    public async Task<EncryptionKey> UpdateWrappedKeyAsync(
+        Guid keyId,
+        string scope,
+        WrappedKey newWrappedKey,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(newWrappedKey);
+
+        // Tracked load (no AsNoTracking) so the mutation below is persisted by SaveChangesAsync.
+        // IgnoreQueryFilters per L1 — DEK rows must never be hidden by the consumer's tenant
+        // filter. Filtering by BOTH KeyId and Scope is the M1 defense: a caller cannot overwrite
+        // another tenant's wrapped DEK by guessing a Guid.
+        EncryptionKeyRecord? record = await Records
+            .IgnoreQueryFilters()
+            .Where(k => k.KeyId == keyId && k.Scope == scope)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (record is null)
+        {
+            // Fail closed: a silent no-op would let a rewrap sweep report success while data
+            // still depends on the old KEK version.
+            LogUpdateWrappedKeyMiss(_logger, keyId, scope);
+            throw new InvalidOperationException(
+                $"Encryption key {keyId} not found for scope '{scope}'; the wrapped key material was not updated.");
+        }
+
+        // Only the wrapped material changes — KeyId, Scope, CreatedAt, ExpiresAt, IsActive are
+        // immutable under a rewrap.
+        record.WrappedCiphertext = newWrappedKey.Ciphertext;
+        record.WrappedProviderVersion = newWrappedKey.ProviderVersion;
+
+        await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        LogWrappedKeyUpdated(_logger, keyId, scope, newWrappedKey.ProviderVersion);
+        return record.ToDomain();
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<EncryptionKey>> GetHistoricalAsync(string scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -304,4 +343,16 @@ public sealed partial class EntityFrameworkCoreEncryptionKeyStore<TContext>(
         Level = LogLevel.Debug,
         Message = "Vellum EF Core store: GetByIdAsync miss for key {KeyId} under scope {Scope}.")]
     private static partial void LogGetByIdMiss(ILogger logger, Guid keyId, string scope);
+
+    [LoggerMessage(
+        EventId = 7,
+        Level = LogLevel.Information,
+        Message = "Vellum EF Core store: updated wrapped key material for key {KeyId} in scope {Scope} (new provider version {ProviderVersion}).")]
+    private static partial void LogWrappedKeyUpdated(ILogger logger, Guid keyId, string scope, string providerVersion);
+
+    [LoggerMessage(
+        EventId = 8,
+        Level = LogLevel.Warning,
+        Message = "Vellum EF Core store: UpdateWrappedKeyAsync miss for key {KeyId} under scope {Scope} — failing closed.")]
+    private static partial void LogUpdateWrappedKeyMiss(ILogger logger, Guid keyId, string scope);
 }

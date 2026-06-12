@@ -71,6 +71,7 @@ static IPayloadEncryptor BuildEncryptor(bool encryptionEnabled)
 
     IPayloadEncryptor inner = new PayloadEncryptor(
         dekManager,
+        kek,
         rng,
         Options.Create(new VellumOptions()),
         NullLogger<PayloadEncryptor>.Instance);

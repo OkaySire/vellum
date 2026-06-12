@@ -85,4 +85,23 @@ public sealed class FeatureFlaggedPayloadEncryptor(
 
         return _inner.DecryptAsync(payload, scope, cancellationToken);
     }
+
+    public Task<EncryptedPayload> RewrapPayloadAsync(
+        EncryptedPayload payload,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+
+        if (string.Equals(
+                payload.WrappedDek.ProviderVersion,
+                PassthroughProviderVersion,
+                StringComparison.Ordinal))
+        {
+            // Passthrough sentinel — there is no wrapped DEK to rewrap; the envelope is
+            // returned unchanged so a bulk rewrap sweep can run over mixed storage safely.
+            return Task.FromResult(payload);
+        }
+
+        return _inner.RewrapPayloadAsync(payload, cancellationToken);
+    }
 }

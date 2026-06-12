@@ -185,5 +185,8 @@ public sealed class StaticServiceCollectionExtensionsTests
 
         public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(Array.Empty<byte>());
+
+        public Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new WrappedKey("noop", "v1"));
     }
 }

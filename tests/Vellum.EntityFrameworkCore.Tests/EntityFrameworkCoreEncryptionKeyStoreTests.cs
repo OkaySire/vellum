@@ -525,6 +525,101 @@ public sealed class EntityFrameworkCoreEncryptionKeyStoreTests
                 "the original DbUpdateException must be preserved as the inner exception");
     }
 
+    // ---------- UpdateWrappedKeyAsync (H2 — KEK rewrap persistence) ----------
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_UpdatesMaterialAndVersion_AndPersists()
+    {
+        await using TestHarness harness = new();
+        EncryptionKey key = MakeKey(ScopeA);
+        await harness.Store.CreateAsync(key);
+
+        WrappedKey rewrapped = new("ciphertext-rewrapped", "v2");
+        EncryptionKey updated = await harness.Store.UpdateWrappedKeyAsync(key.KeyId, ScopeA, rewrapped);
+
+        updated.WrappedKey.Should().Be(rewrapped);
+
+        // Re-read through a FRESH context/store to prove the change hit the database, not
+        // just the original change tracker.
+        EntityFrameworkCoreEncryptionKeyStore<TestDbContext> freshStore = harness.CreateStore();
+        EncryptionKey? persisted = await freshStore.GetByIdAsync(key.KeyId, ScopeA);
+        persisted.Should().NotBeNull();
+        persisted!.WrappedKey.Ciphertext.Should().Be("ciphertext-rewrapped");
+        persisted.WrappedKey.ProviderVersion.Should().Be("v2");
+    }
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_PreservesIdentityAndLifecycleFields()
+    {
+        await using TestHarness harness = new();
+        DateTimeOffset createdAt = new(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        EncryptionKey key = MakeKey(ScopeA, createdAt);
+        await harness.Store.CreateAsync(key);
+
+        EncryptionKey updated = await harness.Store.UpdateWrappedKeyAsync(
+            key.KeyId,
+            ScopeA,
+            new WrappedKey("ciphertext-rewrapped", "v9"));
+
+        updated.KeyId.Should().Be(key.KeyId);
+        updated.Scope.Should().Be(ScopeA);
+        updated.CreatedAt.Should().Be(createdAt);
+        updated.ExpiresAt.Should().BeNull();
+        updated.IsActive.Should().BeTrue("rewrapping never changes a key's lifecycle state");
+    }
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_WorksOnHistoricalInactiveKey()
+    {
+        // A rewrap sweep must refresh HISTORICAL keys too — they are exactly the ones that
+        // still reference old KEK versions after a rotation.
+        await using TestHarness harness = new();
+        EncryptionKey key = MakeKey(ScopeA);
+        await harness.Store.CreateAsync(key);
+        await harness.Store.DeactivateAllAsync(ScopeA);
+
+        EncryptionKey updated = await harness.Store.UpdateWrappedKeyAsync(
+            key.KeyId,
+            ScopeA,
+            new WrappedKey("ciphertext-rewrapped", "v2"));
+
+        updated.IsActive.Should().BeFalse("the key stays inactive — only the wrapping changed");
+        updated.WrappedKey.ProviderVersion.Should().Be("v2");
+    }
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_WrongScope_ThrowsAndDoesNotUpdate()
+    {
+        // M1 defence: a caller cannot overwrite another tenant's wrapped DEK by guessing a Guid.
+        await using TestHarness harness = new();
+        EncryptionKey key = MakeKey(ScopeA);
+        await harness.Store.CreateAsync(key);
+
+        Func<Task> act = async () => await harness.Store.UpdateWrappedKeyAsync(
+            key.KeyId,
+            ScopeB,
+            new WrappedKey("ciphertext-attacker", "v2"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+
+        EncryptionKey? untouched = await harness.Store.GetByIdAsync(key.KeyId, ScopeA);
+        untouched!.WrappedKey.Should().Be(key.WrappedKey, "a scope mismatch must not modify the key");
+    }
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_UnknownKeyId_Throws()
+    {
+        await using TestHarness harness = new();
+
+        Func<Task> act = async () => await harness.Store.UpdateWrappedKeyAsync(
+            Guid.NewGuid(),
+            ScopeA,
+            new WrappedKey("ciphertext-rewrapped", "v2"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>(
+            "a silent no-op would let a rewrap sweep report success while data still depends on the old KEK version");
+    }
+
     // ---------- Argument validation ----------
 
     [Fact]

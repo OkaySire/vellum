@@ -2,7 +2,7 @@
 
 > **Goal.** An operational guide to rotating keys in a Vellum deployment: what DEK rotation and
 > KEK rotation each do, which operations are safe, and the **one Vault knob that can permanently
-> destroy data** (`min_decryption_version`) — and why you must not touch it today.
+> destroy data** (`min_decryption_version`) — and the rewrap procedure that makes touching it safe.
 
 This runbook assumes the HashiCorp Vault Transit provider (`Vellum.Vault`). The DEK-side
 sections apply to any KEK provider; the Vault CLI sections are Transit-specific.
@@ -130,38 +130,113 @@ new `min_decryption_version`, that DEK can never be unwrapped again and those pa
 envelopes in the backup carry the same dead wrapped DEKs), only from a Vault key-version
 restore — if your Vault policy even retains the material.
 
-### The safe procedure
+### The safe procedure (0.2.0+: rewrap tooling)
 
-1. **Rotate the Vault key** (`vault write -f transit/keys/<name>/rotate`). Safe, instant,
-   reversible in effect — old versions keep working.
-2. **Let new DEKs adopt the new version automatically.** Every DEK rotation from now on wraps
-   under the new KEK version. With `Vellum.Rotation` at the default 24 h `MaxDekAge`, all
-   *active* DEKs reference the new version within a day.
-3. **Before ever bumping `min_decryption_version`**: every persisted envelope and every stored
-   `EncryptionKey` row must first be rewrapped/re-encrypted so that nothing references a version
-   below the new minimum. **Vellum has no rewrap tooling yet** (a rewrap utility leveraging
-   Transit's `/rewrap` endpoint is planned). Until it exists, the operational rule is simple:
+Vellum ships the rewrap tooling that makes retiring old KEK versions safe:
+`VellumRewrapService.RewrapStoredKeysAsync` refreshes the key-store rows and
+`IPayloadEncryptor.RewrapPayloadAsync` refreshes the wrapped DEK embedded in each persisted
+envelope. Both delegate to Transit's native `/rewrap` endpoint — **the plaintext DEKs never
+leave Vault**, and the AES-GCM payloads themselves are untouched (the DEK is unchanged, only
+its wrapping is refreshed).
 
-   > **Do not bump `min_decryption_version`. Ever.**
+Follow the five steps **in order**. Skipping any step before raising `min_decryption_version`
+risks permanently undecryptable data.
 
-   The compensating control is that rotating the KEK (step 1) already addresses the realistic
-   threat — newly-created material no longer depends on the old version — without destroying
-   access to historical data.
+**1. Rotate the Vault key.** Safe, instant — old versions keep working:
 
-### Pre-flight check (if you believe you must bump anyway)
+```bash
+vault write -f transit/keys/<key-name>/rotate
+```
 
-Do not bump unless **all** of the following hold, verified, in order:
+**2. Rewrap the stored keys, scope by scope.** `VellumRewrapService` is registered by
+`AddVellum()`; sweep every scope (active *and* historical keys are covered):
 
-- [ ] You have inventoried the `vault:v<N>:` version prefix of `WrappedKey.Ciphertext` across
-      **every** `EncryptionKey` row in the key store, for every scope, active *and* historical.
-- [ ] You have inventoried the embedded `WrappedDek` version of **every persisted
-      `EncryptedPayload`** in every table/blob/queue where envelopes are stored — including
-      backups you may need to restore.
+```csharp
+using IServiceScope serviceScope = app.Services.CreateScope();
+IEncryptionKeyStore store = serviceScope.ServiceProvider.GetRequiredService<IEncryptionKeyStore>();
+VellumRewrapService rewrapService = serviceScope.ServiceProvider.GetRequiredService<VellumRewrapService>();
+
+IReadOnlyList<string> scopes = await store.GetActiveScopesAsync(cancellationToken);
+foreach (string scope in scopes)
+{
+    RewrapScopeResult result = await rewrapService.RewrapStoredKeysAsync(scope, cancellationToken);
+    if (result.Failed > 0)
+    {
+        // One key failing never aborts the sweep — it is logged and recorded here.
+        // Rewrap is idempotent: re-run the scope until Failed == 0 before proceeding.
+        logger.LogError(
+            "Scope {Scope}: {Failed}/{Total} keys failed to rewrap: {FailedKeyIds}",
+            scope, result.Failed, result.Total, result.FailedKeyIds);
+    }
+}
+```
+
+Do **not** proceed until every scope reports `Failed == 0`. If your deployment has scopes
+without an active key (fully revoked scopes that still hold historical keys), enumerate those
+scopes from your own records too — `GetActiveScopesAsync` only lists scopes with an active key.
+
+**3. Rewrap every persisted envelope.** Each `EncryptedPayload` embeds its own copy of the
+wrapped DEK, so iterate every table/blob/queue where you persist envelopes and rewrap them in
+place. Generic EF Core example:
+
+```csharp
+IPayloadEncryptor encryptor = serviceScope.ServiceProvider.GetRequiredService<IPayloadEncryptor>();
+
+// Page through your envelope-bearing rows; adapt the entity/fields to your schema.
+foreach (SecretNoteRecord row in await dbContext.SecretNotes.ToListAsync(cancellationToken))
+{
+    EncryptedPayload envelope = new(
+        row.Ciphertext,
+        row.Nonce,
+        new WrappedKey(row.WrappedDekCiphertext, row.WrappedDekProviderVersion),
+        row.KeyId,
+        row.FormatVersion);
+
+    EncryptedPayload rewrapped = await encryptor.RewrapPayloadAsync(envelope, cancellationToken);
+
+    // Only the wrapped DEK changed — ciphertext, nonce, key id, format version are identical.
+    row.WrappedDekCiphertext = rewrapped.WrappedDek.Ciphertext;
+    row.WrappedDekProviderVersion = rewrapped.WrappedDek.ProviderVersion;
+}
+
+await dbContext.SaveChangesAsync(cancellationToken);
+```
+
+`RewrapPayloadAsync` is idempotent, so the sweep can be re-run after a partial failure. Don't
+forget envelopes outside your primary database (queues, blob storage, exports) — and remember
+that **database backups keep the old wrapped DEKs**: a restore from a pre-rewrap backup needs
+the old KEK versions, so factor your backup retention into when you bump.
+
+**4. Verify.** Confirm nothing references a version below the intended minimum, and spot-check
+decryption end to end:
+
+```bash
+vault read transit/keys/<key-name>   # latest_version is what everything should now reference
+```
+
+- [ ] Inventory the `vault:v<N>:` version prefix of `WrappedKey.Ciphertext` across **every**
+      `EncryptionKey` row in the key store, for every scope, active *and* historical.
+- [ ] Inventory the embedded `WrappedDek` version of **every persisted `EncryptedPayload`** in
+      every table/blob/queue where envelopes are stored — including backups you may need to
+      restore.
 - [ ] The minimum version found across both inventories is **≥** the value you intend to set.
+- [ ] Spot-check: decrypt a sample of old envelopes through `IPayloadEncryptor.DecryptAsync`
+      and confirm the plaintexts are intact.
 - [ ] You have a tested Vault disaster-recovery path for the key in question.
 
-If you cannot complete the inventory (in practice: if envelopes are spread across systems you do
-not fully control), you cannot bump safely. Leave `min_decryption_version` alone.
+**5. Only then bump `min_decryption_version`:**
+
+```bash
+vault write transit/keys/<key-name>/config min_decryption_version=<N>
+```
+
+> **Warning.** The bump is the point of no return: any wrapped DEK below the new minimum —
+> including ones sitting in database backups, replicas, or systems you forgot in step 3 —
+> becomes permanently undecryptable the moment you run it. If you cannot complete the
+> inventory in step 4 (in practice: if envelopes are spread across systems you do not fully
+> control), you cannot bump safely. Leave `min_decryption_version` alone — rotating the KEK
+> (step 1) already addresses the realistic threat, since newly-created material no longer
+> depends on the old version.
 
 ## Quick reference
 
@@ -171,4 +246,6 @@ not fully control), you cannot bump safely. Leave `min_decryption_version` alone
 | Rotate all old DEKs continuously | `services.AddVellumRotation(...)` | Yes — age-gated, per-scope retry |
 | Rotate the KEK | `vault write -f transit/keys/<name>/rotate` | Yes — old versions keep unwrapping |
 | Inspect KEK versions | `vault read transit/keys/<name>` | Yes — read-only |
-| Raise `min_decryption_version` | `vault write transit/keys/<name>/config min_decryption_version=N` | **No — permanently destroys access to any payload wrapped under version &lt; N. Do not run.** |
+| Rewrap stored keys for a scope | `VellumRewrapService.RewrapStoredKeysAsync(scope)` | Yes — idempotent, plaintext never leaves Vault |
+| Rewrap a persisted envelope | `IPayloadEncryptor.RewrapPayloadAsync(payload)` | Yes — idempotent, payload bytes unchanged |
+| Raise `min_decryption_version` | `vault write transit/keys/<name>/config min_decryption_version=N` | **Only after steps 1–4 of the safe procedure, verified. Otherwise it permanently destroys access to any payload wrapped under version &lt; N.** |

@@ -86,4 +86,41 @@ public interface IPayloadEncryptor
     /// <exception cref="System.InvalidOperationException">Thrown when <see cref="IsEnabled"/> is <see langword="false"/> or the wrapped DEK cannot be unwrapped.</exception>
     /// <exception cref="System.OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is cancelled.</exception>
     public Task<byte[]> DecryptAsync(EncryptedPayload payload, string scope, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns a copy of <paramref name="payload"/> whose embedded wrapped DEK
+    /// (<see cref="EncryptedPayload.WrappedDek"/>) has been re-encrypted under the KEK provider's
+    /// current key version via <see cref="IKeyEncryptionProvider.RewrapAsync(WrappedKey, CancellationToken)"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every persisted envelope embeds its own copy of the wrapped DEK, so retiring an old KEK
+    /// version (for example, bumping Vault Transit's <c>min_decryption_version</c>) requires
+    /// rewrapping each stored envelope first. Consumers iterate their own payload storage and call
+    /// this method per envelope, persisting the returned copy in place of the original.
+    /// </para>
+    /// <para>
+    /// <b>Payload untouched.</b> The plaintext DEK is unchanged by the rewrap, so the AES-GCM
+    /// ciphertext stays valid: <see cref="EncryptedPayload.Ciphertext"/>,
+    /// <see cref="EncryptedPayload.Nonce"/>, <see cref="EncryptedPayload.KeyId"/> and
+    /// <see cref="EncryptedPayload.FormatVersion"/> are carried over verbatim — only
+    /// <see cref="EncryptedPayload.WrappedDek"/> differs. The returned envelope decrypts to the
+    /// same plaintext under the same scope.
+    /// </para>
+    /// <para>
+    /// <b>Idempotent.</b> Rewrapping an envelope that is already wrapped under the current KEK
+    /// version is harmless — the result simply carries a fresh ciphertext for the same version,
+    /// so a partially-completed sweep can be re-run from the start.
+    /// </para>
+    /// <para>
+    /// <b>Fail closed.</b> Any error must throw; the original envelope is never returned as if it
+    /// had been rewrapped.
+    /// </para>
+    /// </remarks>
+    /// <param name="payload">The self-contained envelope whose wrapped DEK should be rewrapped.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A copy of <paramref name="payload"/> with a freshly-rewrapped <see cref="EncryptedPayload.WrappedDek"/>.</returns>
+    /// <exception cref="System.InvalidOperationException">Thrown when <see cref="IsEnabled"/> is <see langword="false"/> or the wrapped DEK cannot be rewrapped.</exception>
+    /// <exception cref="System.OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is cancelled.</exception>
+    public Task<EncryptedPayload> RewrapPayloadAsync(EncryptedPayload payload, CancellationToken cancellationToken = default);
 }

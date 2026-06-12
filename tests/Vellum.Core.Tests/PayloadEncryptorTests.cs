@@ -39,6 +39,7 @@ public sealed class PayloadEncryptorTests
 
         PayloadEncryptor encryptor = new(
             dekManager,
+            provider,
             random,
             Options.Create(options),
             NullLogger<PayloadEncryptor>.Instance);
@@ -256,6 +257,7 @@ public sealed class PayloadEncryptorTests
 
         PayloadEncryptor encryptor = new(
             dekManager,
+            realProvider,
             random,
             Options.Create(options),
             NullLogger<PayloadEncryptor>.Instance);
@@ -278,6 +280,7 @@ public sealed class PayloadEncryptorTests
             NullLogger<DekManager>.Instance);
         PayloadEncryptor decryptOnly = new(
             decryptDekManager,
+            shortProvider,
             random,
             Options.Create(options),
             NullLogger<PayloadEncryptor>.Instance);
@@ -365,6 +368,7 @@ public sealed class PayloadEncryptorTests
         FixedDekManager dekManager = new(dekBytesLength);
         PayloadEncryptor encryptor = new(
             dekManager,
+            new FakeKeyEncryptionProvider(),
             new CountingRandomBytesProvider(),
             Options.Create(new VellumOptions()),
             NullLogger<PayloadEncryptor>.Instance);
@@ -385,6 +389,7 @@ public sealed class PayloadEncryptorTests
         FixedDekManager dekManager = new(dekBytesLength: 32);
         PayloadEncryptor encryptor = new(
             dekManager,
+            new FakeKeyEncryptionProvider(),
             new CountingRandomBytesProvider(),
             Options.Create(new VellumOptions()),
             NullLogger<PayloadEncryptor>.Instance);
@@ -554,6 +559,111 @@ public sealed class PayloadEncryptorTests
         await act.Should().ThrowAsync<CryptographicException>();
     }
 
+    // ---------------------------------------------------------------------
+    // RewrapPayloadAsync (H3 — envelope-level KEK rewrap)
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public async Task RewrapPayloadAsync_OnlyWrappedDekChanges_AndEnvelopeDecryptsIdentically()
+    {
+        (PayloadEncryptor encryptor, _, _) = BuildSut();
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("rewrap me");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
+
+        EncryptedPayload rewrapped = await encryptor.RewrapPayloadAsync(envelope);
+
+        // The DEK plaintext is untouched by the rewrap, so the AES-GCM payload fields are
+        // carried over verbatim — only the wrapped DEK differs.
+        rewrapped.WrappedDek.Should().NotBe(envelope.WrappedDek);
+        rewrapped.Ciphertext.Should().BeSameAs(envelope.Ciphertext);
+        rewrapped.Nonce.Should().BeSameAs(envelope.Nonce);
+        rewrapped.KeyId.Should().Be(envelope.KeyId);
+        rewrapped.FormatVersion.Should().Be(envelope.FormatVersion);
+
+        byte[] decrypted = await encryptor.DecryptAsync(rewrapped, Scope);
+        decrypted.Should().Equal(plaintext, "the rewrapped envelope must decrypt to the same plaintext");
+    }
+
+    [Fact]
+    public async Task RewrapPayloadAsync_UpdatesProviderVersion()
+    {
+        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut();
+
+        EncryptedPayload envelope = await encryptor.EncryptAsync(
+            Encoding.UTF8.GetBytes("version bump"),
+            Scope);
+        envelope.WrappedDek.ProviderVersion.Should().Be("v1");
+
+        EncryptedPayload rewrapped = await encryptor.RewrapPayloadAsync(envelope);
+
+        rewrapped.WrappedDek.ProviderVersion.Should().Be("v2",
+            "the fake provider rewraps under the current KEK version");
+        provider.RewrapCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task RewrapPayloadAsync_NullPayload_Throws()
+    {
+        (PayloadEncryptor encryptor, _, _) = BuildSut();
+
+        Func<Task> act = async () => await encryptor.RewrapPayloadAsync(null!);
+
+        await act.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    [Fact]
+    public async Task RewrapPayloadAsync_ProviderFails_FailsClosed()
+    {
+        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut();
+
+        EncryptedPayload envelope = await encryptor.EncryptAsync(
+            Encoding.UTF8.GetBytes("fail closed"),
+            Scope);
+        provider.FailRewrapHandles.Add(envelope.WrappedDek.Ciphertext);
+
+        Func<Task> act = async () => await encryptor.RewrapPayloadAsync(envelope);
+
+        await act.Should().ThrowAsync<InvalidOperationException>(
+            "a failed rewrap must throw — the original envelope is never returned as if it had been rewrapped");
+    }
+
+    [Fact]
+    public async Task RewrapPayloadAsync_CacheInteraction_BothOldAndNewEnvelopesDecrypt()
+    {
+        // L24: the decrypt cache is keyed by SHA-256 of WrappedKey.Ciphertext. A rewrapped
+        // envelope carries a NEW ciphertext, so it gets a NEW cache key automatically — no
+        // invalidation needed. The OLD envelope's entry stays valid and keeps serving cache
+        // hits until it ages out. Both entries hold the SAME plaintext DEK, so both envelopes
+        // decrypt correctly regardless of which path they take.
+        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut();
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("cache interaction");
+        EncryptedPayload oldEnvelope = await encryptor.EncryptAsync(plaintext, Scope);
+
+        // Prime the wrapped-key cache for the OLD envelope.
+        (await encryptor.DecryptAsync(oldEnvelope, Scope)).Should().Equal(plaintext);
+        int unwrapsAfterPrime = provider.UnwrapCalls;
+
+        EncryptedPayload newEnvelope = await encryptor.RewrapPayloadAsync(oldEnvelope);
+
+        // 1) The NEW envelope decrypts via the cold path: its rewrapped ciphertext hashes to
+        //    a cache key nothing has populated yet, so exactly one unwrap round-trip happens.
+        (await encryptor.DecryptAsync(newEnvelope, Scope)).Should().Equal(plaintext);
+        provider.UnwrapCalls.Should().Be(unwrapsAfterPrime + 1,
+            "the rewrapped ciphertext produces a new cache key, so the first decrypt is a cache miss");
+
+        // 2) The OLD envelope still decrypts from its live cache entry — zero extra unwraps.
+        (await encryptor.DecryptAsync(oldEnvelope, Scope)).Should().Equal(plaintext);
+        provider.UnwrapCalls.Should().Be(unwrapsAfterPrime + 1,
+            "the old envelope's cache entry is untouched by the rewrap and keeps serving hits");
+
+        // 3) And the NEW envelope is now cached too.
+        (await encryptor.DecryptAsync(newEnvelope, Scope)).Should().Equal(plaintext);
+        provider.UnwrapCalls.Should().Be(unwrapsAfterPrime + 1,
+            "the second decrypt of the rewrapped envelope must hit the cache");
+    }
+
     /// <summary>
     /// Minimal KEK provider whose <see cref="UnwrapAsync"/> returns a buffer of the
     /// configured length, regardless of what was wrapped. Used to prove that Vellum
@@ -568,6 +678,9 @@ public sealed class PayloadEncryptorTests
 
         public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
             => Task.FromResult(new byte[dekBytesLength]);
+
+        public Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Not used by these tests.");
     }
 
     /// <summary>

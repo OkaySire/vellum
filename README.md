@@ -108,9 +108,12 @@ services.AddVellumRotation(o =>
 Each tick rotates only the scopes whose active DEK has reached `MaxDekAge`; transient
 KEK-provider failures are retried per scope with exponential backoff and jitter inside
 the tick, and a failed scope never blocks the others. Rotation is fail-safe: if the KEK
-provider fails mid-rotation, the previous key stays active. For the full operational
-picture — including KEK rotation on the Vault side and the `min_decryption_version`
-hazard — see the [key rotation runbook](docs/kek-rotation.md).
+provider fails mid-rotation, the previous key stays active. KEK rewrap tooling
+(`VellumRewrapService.RewrapStoredKeysAsync` + `IPayloadEncryptor.RewrapPayloadAsync`)
+re-encrypts stored keys and persisted envelopes under the current KEK version, making it
+safe to retire old KEK versions. For the full operational picture — including KEK rotation
+on the Vault side and the `min_decryption_version` procedure — see the
+[key rotation runbook](docs/kek-rotation.md).
 
 ### Design-time scaffolder (`dotnet ef migrations add`)
 

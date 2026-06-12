@@ -73,4 +73,7 @@ public sealed class FakeEncryptionKeyStore : IEncryptionKeyStore
 
     public Task<IReadOnlyList<EncryptionKey>> GetHistoricalAsync(string scope, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("The rotation worker must not call GetHistoricalAsync.");
+
+    public Task<EncryptionKey> UpdateWrappedKeyAsync(Guid keyId, string scope, WrappedKey newWrappedKey, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The rotation worker must not call UpdateWrappedKeyAsync.");
 }

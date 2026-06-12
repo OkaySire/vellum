@@ -26,6 +26,7 @@ public sealed class VellumServiceCollectionExtensionsTests
 
         scope.ServiceProvider.GetRequiredService<IDekManager>().Should().BeOfType<DekManager>();
         scope.ServiceProvider.GetRequiredService<IPayloadEncryptor>().Should().BeOfType<PayloadEncryptor>();
+        scope.ServiceProvider.GetRequiredService<VellumRewrapService>().Should().NotBeNull();
         scope.ServiceProvider.GetRequiredService<IRandomBytesProvider>().Should().BeOfType<DefaultRandomBytesProvider>();
         scope.ServiceProvider.GetRequiredService<TimeProvider>().Should().Be(TimeProvider.System);
 

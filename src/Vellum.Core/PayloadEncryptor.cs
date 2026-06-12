@@ -39,6 +39,7 @@ namespace Vellum;
 /// </remarks>
 public sealed partial class PayloadEncryptor(
     IDekManager dekManager,
+    IKeyEncryptionProvider keyProvider,
     IRandomBytesProvider randomBytes,
     IOptions<VellumOptions> options,
     ILogger<PayloadEncryptor> logger) : IPayloadEncryptor
@@ -55,6 +56,7 @@ public sealed partial class PayloadEncryptor(
     private const string ScopeAadLabel = "vellum:aad:v2:scope:";
 
     private readonly IDekManager _dekManager = dekManager ?? throw new ArgumentNullException(nameof(dekManager));
+    private readonly IKeyEncryptionProvider _keyProvider = keyProvider ?? throw new ArgumentNullException(nameof(keyProvider));
     private readonly IRandomBytesProvider _randomBytes = randomBytes ?? throw new ArgumentNullException(nameof(randomBytes));
     private readonly VellumOptions _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
     private readonly ILogger<PayloadEncryptor> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -208,6 +210,26 @@ public sealed partial class PayloadEncryptor(
         }
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Delegates to <see cref="IKeyEncryptionProvider.RewrapAsync(WrappedKey, CancellationToken)"/>
+    /// — the plaintext DEK is never unwrapped here (with a native-rewrap backend such as Vault
+    /// Transit, it never leaves the backend at all). Because the DEK plaintext is untouched, the
+    /// AES-GCM ciphertext, nonce, key id, and format version are carried over verbatim and the
+    /// returned envelope decrypts identically under the same scope.
+    /// </remarks>
+    public async Task<EncryptedPayload> RewrapPayloadAsync(
+        EncryptedPayload payload,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+
+        WrappedKey rewrapped = await _keyProvider.RewrapAsync(payload.WrappedDek, cancellationToken).ConfigureAwait(false);
+
+        LogPayloadRewrapped(_logger, payload.KeyId, rewrapped.ProviderVersion);
+        return payload with { WrappedDek = rewrapped };
+    }
+
     /// <summary>
     /// Builds the AES-GCM associated data for a format version 2 envelope:
     /// <c>UTF8("vellum:aad:v2:scope:" + scope)</c>. This is the single place the v2 AAD
@@ -222,4 +244,7 @@ public sealed partial class PayloadEncryptor(
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Payload decrypted with key {KeyId}")]
     private static partial void LogPayloadDecrypted(ILogger logger, Guid keyId);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Payload envelope rewrapped for key {KeyId} (new provider version {ProviderVersion})")]
+    private static partial void LogPayloadRewrapped(ILogger logger, Guid keyId, string providerVersion);
 }

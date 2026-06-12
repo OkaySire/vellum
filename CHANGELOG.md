@@ -16,6 +16,26 @@ provider failure mid-rotation left scopes with zero active keys.
 
 ### Breaking
 
+- **KEK rewrap tooling adds three interface members.** Consumers who implement these
+  interfaces directly must implement the new members; all Vellum-shipped implementations
+  are included:
+  - `IKeyEncryptionProvider.RewrapAsync(WrappedKey, CancellationToken)` — re-encrypts a
+    wrapped DEK under the provider's current KEK version without exposing the plaintext
+    to the caller. `Vellum.Vault` uses Transit's native `POST /v1/transit/rewrap/{key}`
+    (plaintext never leaves Vault); `Vellum.Static` unwraps/rewraps internally and zeroes
+    the intermediate plaintext (dev-only provider).
+  - `IEncryptionKeyStore.UpdateWrappedKeyAsync(Guid keyId, string scope, WrappedKey,
+    CancellationToken)` — replaces the wrapped material of an existing key (active or
+    historical), scope-checked (M1), fail-closed (`InvalidOperationException` on missing
+    key or scope mismatch — never a silent no-op). KeyId/Scope/CreatedAt/ExpiresAt/IsActive
+    are immutable; only the wrapped material and provider version change.
+  - `IPayloadEncryptor.RewrapPayloadAsync(EncryptedPayload, CancellationToken)` — returns
+    a copy of the envelope with the embedded `WrappedDek` rewrapped; ciphertext, nonce,
+    key id, and format version are carried over verbatim (the DEK plaintext is untouched,
+    so the AES-GCM payload stays valid).
+- **`PayloadEncryptor` constructor gains an `IKeyEncryptionProvider` parameter** (second
+  position) to back `RewrapPayloadAsync`. Consumers who construct `PayloadEncryptor` by
+  hand (rare — normally the DI container does it) must pass the provider.
 - **`IEncryptionKeyStore` gains `RotateAsync(EncryptionKey newKey, CancellationToken)`.**
   Atomically deactivates all active keys for the new key's scope *and* inserts the
   new active key in a single transaction. On failure nothing changes — the old key
@@ -64,6 +84,22 @@ provider failure mid-rotation left scopes with zero active keys.
 
 ### Added
 
+- **KEK rewrap tooling** — the missing piece that makes retiring old KEK versions
+  (Vault Transit `min_decryption_version`) safe:
+  - `VellumRewrapService.RewrapStoredKeysAsync(scope)` (registered by `AddVellum()`,
+    scoped) sweeps every stored key for a scope — active *and* historical, deduplicated
+    by key id — rewraps each via the KEK provider and persists the refreshed material.
+    Per-key failure isolation: one key failing never aborts the sweep; failures are
+    logged and returned in `RewrapScopeResult(Total, Rewrapped, Failed, FailedKeyIds)`
+    so the (idempotent) sweep can be re-run until `Failed == 0`.
+  - `IPayloadEncryptor.RewrapPayloadAsync(payload)` rewraps the wrapped DEK embedded in
+    a persisted envelope; consumers iterate their own payload storage and persist the
+    returned copy. The decrypt cache needs no invalidation: entries are keyed by a
+    SHA-256 of the wrapped ciphertext, so a rewrapped envelope gets a fresh cache key
+    while the old envelope's entry simply ages out (L24).
+  - `docs/kek-rotation.md` now documents the **safe `min_decryption_version` procedure**
+    (rotate → rewrap stored keys → rewrap envelopes → verify → bump) instead of a
+    blanket "never bump" rule.
 - **`Vellum.Rotation` package** — opt-in background DEK rotation hosted service.
   `AddVellumRotation(Action<RotationOptions>?)` registers a worker that ticks every
   `RotationInterval` (default 24 h), rotates only scopes whose active key is older
@@ -77,13 +113,13 @@ provider failure mid-rotation left scopes with zero active keys.
   Transit KEK rotation is safe by default, the fail-safe Vault-down behaviour, and
   the **`min_decryption_version` hazard** (every persisted envelope embeds its own
   wrapped DEK; bumping the minimum above any persisted version makes those payloads
-  permanently undecryptable — rule until rewrap tooling ships: do not bump).
+  permanently undecryptable — only safe after the full rewrap procedure above).
 
 ### Tests
 
-207 → 237 tests per TFM (711 across net8.0/net9.0/net10.0), all green.
-Per-project breakdown (per TFM): `Abstractions 9`, `Core 57`, `EntityFrameworkCore 37`,
-`Static 24`, `InMemory 37`, `Vault 43`, `Rotation 30` (new).
+207 → 332 tests per TFM (996 across net8.0/net9.0/net10.0), all green.
+Per-project breakdown (per TFM): `Abstractions 9`, `Core 83`, `EntityFrameworkCore 42`,
+`Static 28`, `InMemory 43`, `Vault 97`, `Rotation 30` (new).
 
 ## [0.1.0] — 2026-04-13
 
