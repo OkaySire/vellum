@@ -21,13 +21,13 @@ design docs for the long version.
 
 ## Is Vellum production-ready?
 
-**Yes, for non-critical production workloads.** Vellum `0.1.0` is in use by at least one
+**Yes, for non-critical production workloads.** Vellum is in use by at least one
 real consumer in production (an early adopter's multi-tenant message bus backend, after
 three iterations of dogfood feedback that drove most of the pre-1.0 changes). The shipped
 packages — `Vellum.Abstractions`, `Vellum.Core`, `Vellum.Vault`, `Vellum.Static`,
-`Vellum.InMemory`, and `Vellum.EntityFrameworkCore` — are all fully tested, all zero-warning
-builds, and all subject to the same `TreatWarningsAsErrors` + `AllEnabledByDefault`
-analyzer posture as the rest of the library.
+`Vellum.InMemory`, `Vellum.EntityFrameworkCore`, and `Vellum.Rotation` — are all fully
+tested, all zero-warning builds, and all subject to the same `TreatWarningsAsErrors` +
+`AllEnabledByDefault` analyzer posture as the rest of the library.
 
 What is **not** yet production-ready:
 
@@ -37,21 +37,23 @@ What is **not** yet production-ready:
   land as clear `CHANGELOG.md` entries with migration notes.
 - **Cloud KEK providers are not shipped yet.** `Vellum.AzureKeyVault`, `Vellum.AwsKms`, and
   `Vellum.GcpKms` are planned for `0.3.0`. If you need one of these today, you must
-  implement `IKeyEncryptionProvider` yourself against the cloud SDK — the interface is two
-  methods and the Vault provider is the reference implementation at ~270 lines.
-- **Opt-in background rotation is not shipped yet.** `Vellum.Rotation` is planned for
-  `0.4.0`. Until then, rotation is triggered by explicit calls to `IDekManager.RotateDekAsync`;
-  see [How do I rotate DEKs without downtime?](#how-do-i-rotate-deks-without-downtime) for a
-  pattern consumers have used successfully.
+  implement `IKeyEncryptionProvider` yourself against the cloud SDK — the interface is
+  three methods and the Vault provider is the reference implementation.
+- **Metrics, health checks, and OpenTelemetry are not shipped yet.** They are planned for
+  `Vellum.AspNetCore`; until then, derive dashboards from the structured logs (see
+  [Does Vellum ship any telemetry or metrics?](#does-vellum-ship-any-telemetry-or-metrics)).
 
-Verdict: if you are running on .NET 8, 9, or 10; using HashiCorp Vault Transit; and
-willing to carry a small rotation background service in your own host, Vellum is usable
-today. Otherwise, wait for `0.3.0` / `0.4.0`.
+Verdict: if you are running on .NET 8, 9, or 10 and using HashiCorp Vault Transit, Vellum
+is usable today — including scheduled background rotation via the opt-in `Vellum.Rotation`
+package. Otherwise, wait for `0.3.0`.
 
 ## How do I rotate DEKs without downtime?
 
-`IDekManager.RotateDekAsync(scope)` is atomic: it deactivates the current active DEK for
-the given scope and creates a fresh one inside the same logical operation. Historical
+`IDekManager.RotateDekAsync(scope)` is atomic and fail-safe: it generates and wraps the
+new DEK *before* touching anything, then swaps the active key via
+`IEncryptionKeyStore.RotateAsync` (deactivate-old + insert-new in one transaction), then
+replaces the cache entry. If the KEK provider or the store fails at any point, the old key
+stays active *and* cached — the scope is never observed without an active DEK. Historical
 envelopes remain fully decryptable because `EncryptedPayload` carries its own
 `WrappedDek` — a rotation is a write-path operation only, it never re-encrypts existing
 data.
@@ -64,52 +66,36 @@ There is zero downtime because:
    filtered unique index — the loser re-reads the winner's wrapped key and encrypts
    against it, exactly like the 4-layer defence on first-time creation (see
    [architecture — race-safe DEK creation](architecture.md#race-safe-dek-creation-4-layer-defence)).
+   Within a single process, a per-scope async lock serialises create/rotate/slow-read so
+   the race never even reaches the store.
 
-Until `Vellum.Rotation` (planned `0.4.0`) ships an opt-in scheduled rotator, the simplest
-way to rotate on a schedule is a `BackgroundService` in your own host:
+For scheduled rotation, add the opt-in **`Vellum.Rotation`** package — a hosted worker
+that ticks every `RotationInterval`, rotates only scopes whose active key is older than
+`MaxDekAge`, and retries failed scopes with exponential backoff and jitter inside the tick:
 
 ```csharp
-public sealed class DekRotationBackgroundService(
-    IServiceScopeFactory scopeFactory,
-    ILogger<DekRotationBackgroundService> logger,
-    TimeProvider timeProvider) : BackgroundService
+services.AddVellumRotation(o =>
 {
-    private static readonly TimeSpan RotationInterval = TimeSpan.FromDays(30);
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            using IServiceScope scope = scopeFactory.CreateScope();
-            IEncryptionKeyStore store = scope.ServiceProvider.GetRequiredService<IEncryptionKeyStore>();
-            IDekManager manager       = scope.ServiceProvider.GetRequiredService<IDekManager>();
-
-            IReadOnlyList<string> scopes = await store.GetActiveScopesAsync(stoppingToken);
-            foreach (string s in scopes)
-            {
-                IReadOnlyList<EncryptionKey> history = await store.GetHistoricalAsync(s, stoppingToken);
-                EncryptionKey? active = history.FirstOrDefault(k => k.IsActive);
-                if (active is null) continue;
-
-                TimeSpan age = timeProvider.GetUtcNow() - active.CreatedAt;
-                if (age > RotationInterval)
-                {
-                    await manager.RotateDekAsync(s, stoppingToken);
-                }
-            }
-
-            await Task.Delay(TimeSpan.FromHours(1), stoppingToken);
-        }
-    }
-}
+    o.RotationInterval   = TimeSpan.FromHours(24); // how often the worker ticks
+    o.MaxDekAge          = TimeSpan.FromHours(24); // rotate only keys at least this old
+    o.MaxRetriesPerScope = 3;                      // per-scope retry with backoff in the tick
+});
 ```
+
+One scope failing never blocks the others, and `Vellum.Core` itself never starts a
+background service — rotation stays opt-in. See the
+[key rotation runbook](kek-rotation.md) for the full operational picture, including KEK
+rotation on the Vault side.
 
 ## How does Vellum handle multi-tenancy?
 
 Through an **opaque `scope` string** the consumer picks. Vellum never interprets the
-content; it just uses it as a partition key on every read, write, and cache entry. See
+content; it just uses it as a partition key on every read, write, and cache entry — and,
+by default, bakes it into the ciphertext itself: format version 2 envelopes carry the
+scope as AES-GCM associated data, so an envelope copied from one tenant's records into
+another's fails the authentication tag check instead of decrypting. See
 [architecture — multi-tenant isolation](architecture.md#multi-tenant-isolation) for the
-4-layer diagram.
+full layer table.
 
 In practice, pick a scope convention that matches your tenant boundary:
 
@@ -124,27 +110,33 @@ that can change (user display names, region codes, etc.).
 
 ## What happens if a KEK provider is temporarily unavailable?
 
-Vellum **fails closed**. If `IKeyEncryptionProvider.WrapAsync` or `UnwrapAsync` throws
-(HTTP timeout, 5xx, token expired, KEK revoked, …), the exception propagates verbatim to
-the caller. Vellum never retries automatically, never returns the plaintext, never caches
-"KEK unavailable" as a successful result.
+Vellum **fails closed**. If `IKeyEncryptionProvider.WrapAsync` or `UnwrapAsync` ultimately
+fails (HTTP timeout, 5xx, token expired, KEK revoked, …), the exception propagates to the
+caller. Vellum never returns the plaintext and never caches "KEK unavailable" as a
+successful result.
 
-Two practical implications:
+Three practical implications:
 
-1. **Your own layer is responsible for retries and circuit-breaking.** The recommended
-   pattern is to wrap the typed `HttpClient` that `AddVaultProvider` configures with
-   Polly — Vellum does not ship Polly as a dependency because the retry policy is
-   deployment-specific. See
-   [AddHttpClient + Polly](https://learn.microsoft.com/en-us/aspnet/core/fundamentals/http-requests#use-polly-based-handlers)
-   in the .NET docs for the idiomatic registration.
-2. **The DEK cache dampens transient outages.** Any DEK that was unwrapped in the last
+1. **Transient-failure retries are built in (Vault provider, 0.2.0+).** Every Vault
+   request goes through the standard HTTP resilience handler — retries with exponential
+   backoff on transient failures (5xx, 408, 429, timeouts, connection errors), circuit
+   breaker, and per-attempt/total timeouts derived from `VaultOptions.HttpTimeout`. It is
+   on by default; set `VaultOptions.EnableResilience = false` inside the `AddVaultProvider`
+   delegate to opt out and restore single-attempt behaviour. Only failures that outlast
+   the retries propagate to your code.
+2. **Expired tokens self-heal with AppRole.** With
+   `VaultOptions.AuthMethod = VaultAuthMethod.AppRole`, tokens are re-acquired
+   automatically before they expire, and a `403` triggers token invalidation plus a single
+   retry with a fresh token. A static token, by contrast, cannot be re-minted — a `403` on
+   a static token propagates immediately.
+3. **The DEK cache dampens transient outages.** Any DEK that was unwrapped in the last
    `VellumOptions.DekCacheTtl` (default 30 minutes) lives in-process and does not need
    the KEK provider to decrypt. A short Vault outage during peak traffic is mostly
    absorbed by the cache; a long outage blocks new encryptions once the cache expires.
 
 ## Can I use Vellum without EF Core?
 
-Yes. `IEncryptionKeyStore` is a plain interface with 6 methods. If you do not want EF
+Yes. `IEncryptionKeyStore` is a plain interface with 8 methods. If you do not want EF
 Core, you can:
 
 1. Use the shipped **`Vellum.InMemory`** store for tests and samples.
@@ -254,6 +246,12 @@ The DEK cache is the difference between "one KEK round-trip per decrypt" and "on
 round-trip per distinct DEK". For read-heavy workloads it is the single largest performance
 factor in the library.
 
+Since `0.2.0` the cache is a **Vellum-private `VellumDekCache`**, not the application's
+shared `IMemoryCache`: other in-process code cannot read the plaintext DEK entries,
+consumer `SizeLimit` budgeting or compaction cannot evict them, and key bytes are zeroed
+when an entry is evicted, expired, or replaced. `AddVellum()` consequently no longer calls
+`AddMemoryCache()` — if your own code relied on that registration, add it yourself.
+
 - **Cache hit (the fast path).** `IDekManager.GetActiveDekAsync` and
   `GetDekByWrappedKeyAsync` return a completed `ValueTask<Dek>` with no state-machine
   allocation. The only heap allocation on a hit is the clone of the `byte[] Key` (lesson
@@ -324,9 +322,11 @@ example block.
 ## What's the plan for Azure Key Vault / AWS KMS / GCP KMS support?
 
 All three cloud providers are planned for **`0.3.0`**. The interface
-(`IKeyEncryptionProvider.WrapAsync` / `UnwrapAsync`) is already stable; implementing a new
-provider is about 200–300 lines of code plus options / DI extensions / validator and a
-test project.
+(`IKeyEncryptionProvider.WrapAsync` / `UnwrapAsync` / `RewrapAsync`) is already stable;
+implementing a new provider is a few hundred lines of code plus options / DI extensions /
+validator and a test project. (`RewrapAsync` can be implemented as unwrap-then-wrap with
+the intermediate plaintext zeroed — see `Vellum.Static` — when the backend has no native
+rewrap operation.)
 
 If you need one of these providers today, you have two options:
 
@@ -360,7 +360,7 @@ generators (see any `Log*` method in `DekManager` or `PayloadEncryptor`), which 
 for a consumer to build its own dashboards, but there are no counters, histograms, or
 OpenTelemetry spans shipped today.
 
-Planned for `Vellum.AspNetCore` (`0.4.0`):
+Planned for `Vellum.AspNetCore` (a future release):
 
 - OpenTelemetry `Meter` instruments for cache hit rate, KEK round-trip latency, DEK
   creation rate, and rotation events.

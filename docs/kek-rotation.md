@@ -221,7 +221,7 @@ vault read transit/keys/<key-name>   # latest_version is what everything should 
       restore.
 - [ ] The minimum version found across both inventories is **≥** the value you intend to set.
 - [ ] Spot-check: decrypt a sample of old envelopes through `IPayloadEncryptor.DecryptAsync`
-      and confirm the plaintexts are intact.
+      (passing each envelope's scope) and confirm the plaintexts are intact.
 - [ ] You have a tested Vault disaster-recovery path for the key in question.
 
 **5. Only then bump `min_decryption_version`:**

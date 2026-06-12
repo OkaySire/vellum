@@ -11,7 +11,7 @@ wrap `IPayloadEncryptor` in a decorator that honours a feature flag. This sample
 the reference implementation.
 
 This is the issue [#11](https://github.com/OkaySire/vellum/issues/11) workaround
-until a built-in toggle lands in 0.2.0 or later.
+until a built-in toggle lands in a future release.
 
 ## What the decorator does
 

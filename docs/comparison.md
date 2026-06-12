@@ -22,19 +22,19 @@ scenarios where Vellum is explicitly not the best choice.
 
 ## Feature matrix
 
-| Dimension | Vellum `0.1.0` | `Microsoft.AspNetCore.DataProtection` | AWS Encryption SDK for .NET | Google Tink (.NET) | Hand-rolled |
+| Dimension | Vellum `0.2.0` | `Microsoft.AspNetCore.DataProtection` | AWS Encryption SDK for .NET | Google Tink (.NET) | Hand-rolled |
 |---|---|---|---|---|---|
 | **Envelope encryption (DEK + KEK)** | Yes, first-class | No (key ring only) | Yes, first-class | Yes, via KMS AEAD primitives | Usually yes |
 | **Provider-agnostic KEK backends** | Yes (Vault shipped; Azure KV / AWS KMS / GCP KMS planned `0.3.0`) | No — DataProtection manages its own keyring internally | Yes (AWS KMS + multi-provider keyrings) | Yes (AWS KMS, GCP KMS, HashiCorp Vault via community providers) | Usually single-backend |
 | **Storage-agnostic DEK persistence** | Yes (`IEncryptionKeyStore`; EF Core + in-memory shipped) | No — key ring storage is baked in (filesystem, Redis, Azure Blob, …) | Partial — key store hooks exist but most integrations are AWS-centric | Not really — keysets are persisted via `IKeysetReader`/`IKeysetWriter` but the common path is filesystem | Usually yes, by definition |
-| **Multi-tenant isolation built-in** | Yes, 4 layers (store, cache, manager, provider); opaque `Scope` | Partial — purpose strings isolate key derivation, but there is no per-tenant DEK rotation story | No — the consumer builds this on top | No — the consumer builds this on top | Varies |
-| **DEK rotation built-in** | Yes (`RotateDekAsync`), with opt-in background worker coming in `0.4.0` | Yes (automatic key ring rotation every 90 days) | Yes (KMS-side rotation) | Yes (`KeysetManager.Rotate`) | Often missing or ad-hoc |
+| **Multi-tenant isolation built-in** | Yes — store, cache, manager layers plus cryptographic scope binding (the scope is AES-GCM associated data on every envelope by default); opaque `Scope` | Partial — purpose strings isolate key derivation, but there is no per-tenant DEK rotation story | Partial — encryption contexts provide AAD binding; tenancy is the consumer's job | No — the consumer builds this on top | Varies |
+| **DEK rotation built-in** | Yes (`RotateDekAsync` — atomic and fail-safe), plus the opt-in `Vellum.Rotation` background worker | Yes (automatic key ring rotation every 90 days) | Yes (KMS-side rotation) | Yes (`KeysetManager.Rotate`) | Often missing or ad-hoc |
 | **EF Core integration** | Yes, first-class (`Vellum.EntityFrameworkCore`) | No | No | No | Varies |
 | **Memory hygiene (explicit zeroing)** | Yes, documented contract; `CryptographicOperations.ZeroMemory` in every finally block | Partial — BCL primitives zero internally, consumer-visible plaintext is the consumer's responsibility | Yes — the SDK zeroes plaintext material keys after use | Yes — Tink primitives zero sensitive state | Depends on the author |
 | **Authenticated encryption (AES-GCM)** | Yes, AES-256-GCM only | AES-256-CBC + HMAC-SHA-256 (authenticated) by default | AES-256-GCM with optional additional modes | AES-256-GCM, ChaCha20-Poly1305, AES-EAX | Usually AES-GCM |
 | **License** | Apache-2.0 | MIT | Apache-2.0 | Apache-2.0 | — |
-| **Active maintenance (as of April 2026)** | Active (multiple releases in April 2026) | Active (ships with every .NET release) | Active (AWS owned, regular releases) | Active (Google owned, community .NET port) | You maintain it |
-| **Production-ready claim** | Pre-1.0 stable — honest about it; first non-preview drop, production-validated | Yes, standard in every ASP.NET Core app | Yes, standard in AWS-centric shops | Yes for the primitives; the .NET port lags the Java / Go one | Your tests decide |
+| **Active maintenance (as of June 2026)** | Active (`0.2.0` released June 2026) | Active (ships with every .NET release) | Active (AWS owned, regular releases) | Active (Google owned, community .NET port) | You maintain it |
+| **Production-ready claim** | Pre-1.0 stable — honest about it; production-validated | Yes, standard in every ASP.NET Core app | Yes, standard in AWS-centric shops | Yes for the primitives; the .NET port lags the Java / Go one | Your tests decide |
 
 ## When to pick each one
 
@@ -124,7 +124,7 @@ trail", here is how each library handles the envelope format:
 
 | Library | Envelope format | Self-contained? | KeyId required at decrypt? |
 |---|---|---|---|
-| Vellum | `EncryptedPayload(ciphertext, nonce, wrappedDek, keyId)` — `wrappedDek` is the single source of truth at decrypt time | **Yes** — no store round-trip on decrypt | No, audit only |
+| Vellum | `EncryptedPayload(ciphertext, nonce, wrappedDek, keyId, formatVersion)` — `wrappedDek` is the single source of truth at decrypt time; format version 2 (default) binds the scope as AES-GCM AAD | **Yes** — no store round-trip on decrypt | No, audit only |
 | AWS Encryption SDK | Fixed on-wire format (`.html#message-format`) combining ciphertext + encrypted data keys + algorithm suite id | **Yes** — but the format is opinionated and AWS-specific | No (encrypted data keys carry the material) |
 | Google Tink | Keyset reference + primitive-specific ciphertext; the keyset lives separately | No — decrypt requires access to the matching keyset | No (keyset id determines the primitive) |
 | `DataProtection` | Purpose-stringed ciphertext; key ring managed by the framework | No — decrypt requires the matching key ring | No (key ring id is encoded in the output) |
@@ -145,15 +145,14 @@ lookup on the decrypt path. See
 | Startup failure on bad config | Yes — `ValidateOnStart()` on every options type | Yes | Yes | Yes | Depends |
 | Fail-closed on KEK outage | Yes — never returns plaintext on error | Yes | Yes | Yes | Depends |
 | Structured logs (LoggerMessage source-gen) | Yes, with stable EventIds for SIEM rules | Yes, less granular | Yes | Minimal | Varies |
-| Metrics / OpenTelemetry | Not yet (planned `Vellum.AspNetCore` 0.4.0) | Yes (via framework diagnostics) | Yes (AWS SDK metrics) | Partial | Varies |
-| Health checks | Not yet (planned `Vellum.AspNetCore` 0.4.0) | Yes, built-in | Yes, via AWS SDK | No | Varies |
-| Automated rotation | Manual call for now (`RotateDekAsync`); background worker planned `0.4.0` | Automatic (90-day default) | KMS-side | `KeysetManager.Rotate` | Usually DIY |
+| Metrics / OpenTelemetry | Not yet (planned `Vellum.AspNetCore`) | Yes (via framework diagnostics) | Yes (AWS SDK metrics) | Partial | Varies |
+| Health checks | Not yet (planned `Vellum.AspNetCore`) | Yes, built-in | Yes, via AWS SDK | No | Varies |
+| Automated rotation | Yes — opt-in `Vellum.Rotation` background worker (age-gated, per-scope retry); manual `RotateDekAsync` also available | Automatic (90-day default) | KMS-side | `KeysetManager.Rotate` | Usually DIY |
 
-This is the single biggest honesty check for Vellum today: on "everything-except-the-core-
-library" operational concerns (metrics, health checks, automated rotation), Vellum is
-behind the established alternatives. Those gaps are explicitly scoped to the `0.4.0`
-release. If you need them before then, pick a different library or carry the workarounds
-yourself.
+This is the single biggest honesty check for Vellum today: on metrics and health checks,
+Vellum is behind the established alternatives. Those gaps are explicitly scoped to the
+planned `Vellum.AspNetCore` package. If you need them before then, pick a different
+library or carry the workarounds yourself.
 
 ## Summary decision tree
 
@@ -169,7 +168,7 @@ flowchart TD
     AGILE -->|Yes| TINK[Use Google Tink .NET]
     AGILE -->|No| VAULT{Need Vault Transit<br/>or multi-cloud today?}
     VAULT -->|Yes| VELLUM[Use Vellum]
-    VAULT -->|No| WAIT{Can you wait for<br/>Vellum 0.3.0 / 0.4.0?}
+    VAULT -->|No| WAIT{Can you wait for<br/>Vellum 0.3.0?}
     WAIT -->|Yes| VELLUM
     WAIT -->|No| CUSTOM[Wrap your KMS SDK directly or hand-roll<br/>and revisit once Vellum 0.3.0 ships]
 ```

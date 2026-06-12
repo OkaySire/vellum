@@ -29,7 +29,7 @@ This pattern lets you rotate keys at the KEK level without re-encrypting every p
 |---|---|
 | `Vellum.Abstractions` | Interfaces + value objects. Zero dependencies. |
 | `Vellum.Core` | `DekManager` + `PayloadEncryptor`. AES-GCM via `System.Security.Cryptography`. |
-| `Vellum.Vault` | HashiCorp Vault Transit KEK provider. |
+| `Vellum.Vault` | HashiCorp Vault Transit KEK provider. Token + AppRole auth, built-in HTTP resilience. |
 | `Vellum.AzureKeyVault` | Azure Key Vault KEK provider _(Phase 3)_. |
 | `Vellum.AwsKms` | AWS KMS KEK provider _(Phase 3)_. |
 | `Vellum.GcpKms` | Google Cloud KMS KEK provider _(Phase 3)_. |
@@ -58,9 +58,13 @@ flow via `UseVellum` on the `DbContextOptionsBuilder` — configure them once, n
 services.AddVellum(o => o.DekCacheTtl = TimeSpan.FromMinutes(30));
 services.AddVaultProvider(o =>
 {
-    o.Address = "http://vault:8200";
+    o.Address = "https://vault:8200";   // plain http:// is rejected by default
     o.Token   = builder.Configuration["Vault:Token"]!;
     o.KeyName = "my-kek";
+    // Production: prefer AppRole over a static token — tokens are then re-acquired
+    // automatically before they expire (o.AuthMethod = VaultAuthMethod.AppRole
+    // + o.RoleId / o.SecretId). Requests are retried on transient failures by
+    // default (o.EnableResilience = false to opt out).
 });
 services.AddDbContext<AppDbContext>(options => options
     .UseNpgsql(builder.Configuration.GetConnectionString("App"))
@@ -79,13 +83,19 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> opts) : DbContex
 
 // Usage (inject IPayloadEncryptor anywhere)
 EncryptedPayload envelope = await encryptor.EncryptStringAsync("hello", scope: "tenant:42");
-string roundtrip          = await encryptor.DecryptStringAsync(envelope);
+string roundtrip          = await encryptor.DecryptStringAsync(envelope, scope: "tenant:42");
 ```
 
 The envelope carries its own wrapped DEK, so decryption is self-contained — no second
-DB round-trip. `DecryptAsync` is backed by an in-memory cache keyed by the wrapped
-ciphertext (see [#6](https://github.com/OkaySire/vellum/issues/6)), so read-heavy
-workloads pay at most one KEK round-trip per distinct DEK.
+DB round-trip. By default the ciphertext is also **bound to its scope** via AES-GCM
+associated data (envelope format version 2): decrypting requires the same scope, so an
+envelope copied between tenants fails the authentication tag check instead of decrypting.
+Opt out with `VellumOptions.BindScopeToCiphertext = false` if the scope is genuinely
+unavailable at decrypt time; consumers persisting envelopes field-by-field must persist
+`EncryptedPayload.FormatVersion` alongside the other fields. `DecryptAsync` is backed by
+a Vellum-private in-memory cache keyed by the wrapped ciphertext (see
+[#6](https://github.com/OkaySire/vellum/issues/6)), so read-heavy workloads pay at most
+one KEK round-trip per distinct DEK.
 
 For more complete wiring — feature-flagged rollouts, snake_case schemas, migrations
 from a legacy encryption layer, `appsettings.json` bridging — see the

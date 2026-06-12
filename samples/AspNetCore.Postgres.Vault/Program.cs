@@ -51,6 +51,10 @@ builder.Services.AddVaultProvider(opts =>
     opts.Address = builder.Configuration["Vault:Address"] ?? "http://localhost:8200";
     opts.Token   = builder.Configuration["Vault:Token"]   ?? "dev-root";
     opts.KeyName = builder.Configuration["Vault:KeyName"] ?? "vellum-sample-kek";
+    // Dev-only: this sample talks to a local `vault server -dev` over plain HTTP on
+    // loopback. NEVER set this in production — the Vault token and plaintext DEKs
+    // would travel in cleartext. Use an https:// address instead.
+    opts.AllowInsecureHttp = opts.Address.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
 });
 
 WebApplication app = builder.Build();
