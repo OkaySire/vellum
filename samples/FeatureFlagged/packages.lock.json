@@ -17,7 +17,7 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Options": "[9.0.9, )",
-          "Vellum.Abstractions": "[0.1.0-preview.1, )"
+          "Vellum.Abstractions": "[0.2.0, )"
         }
       },
       "vellum.inmemory": {
@@ -25,7 +25,7 @@
         "dependencies": {
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
-          "Vellum.Abstractions": "[0.1.0-preview.1, )"
+          "Vellum.Abstractions": "[0.2.0, )"
         }
       },
       "vellum.static": {
@@ -34,7 +34,7 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Options": "[9.0.9, )",
-          "Vellum.Abstractions": "[0.1.0-preview.1, )"
+          "Vellum.Abstractions": "[0.2.0, )"
         }
       },
       "Microsoft.Extensions.Caching.Abstractions": {
@@ -106,7 +106,7 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Options": "[9.0.9, )",
-          "Vellum.Abstractions": "[0.1.0-preview.1, )"
+          "Vellum.Abstractions": "[0.2.0, )"
         }
       },
       "vellum.inmemory": {
@@ -114,7 +114,7 @@
         "dependencies": {
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
-          "Vellum.Abstractions": "[0.1.0-preview.1, )"
+          "Vellum.Abstractions": "[0.2.0, )"
         }
       },
       "vellum.static": {
@@ -123,7 +123,7 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Options": "[9.0.9, )",
-          "Vellum.Abstractions": "[0.1.0-preview.1, )"
+          "Vellum.Abstractions": "[0.2.0, )"
         }
       },
       "Microsoft.Extensions.Caching.Abstractions": {
@@ -191,7 +191,7 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Options": "[9.0.9, )",
-          "Vellum.Abstractions": "[0.1.0-preview.1, )"
+          "Vellum.Abstractions": "[0.2.0, )"
         }
       },
       "vellum.inmemory": {
@@ -199,7 +199,7 @@
         "dependencies": {
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
-          "Vellum.Abstractions": "[0.1.0-preview.1, )"
+          "Vellum.Abstractions": "[0.2.0, )"
         }
       },
       "vellum.static": {
@@ -208,7 +208,7 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Logging.Abstractions": "[9.0.9, )",
           "Microsoft.Extensions.Options": "[9.0.9, )",
-          "Vellum.Abstractions": "[0.1.0-preview.1, )"
+          "Vellum.Abstractions": "[0.2.0, )"
         }
       },
       "Microsoft.Extensions.Caching.Abstractions": {

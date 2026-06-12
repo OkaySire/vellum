@@ -30,7 +30,7 @@ public sealed class VaultServiceCollectionExtensionsTests
     }
 
     [Fact]
-    public void AddVaultProvider_ConfiguresHttpClient_WithBaseAddressAndToken()
+    public void AddVaultProvider_ConfiguresHttpClient_WithBaseAddress_AndNoDefaultTokenHeader()
     {
         ServiceCollection services = new();
         services.AddLogging();
@@ -47,8 +47,13 @@ public sealed class VaultServiceCollectionExtensionsTests
         HttpClient httpClient = factory.CreateClient(nameof(VaultKeyEncryptionProvider));
 
         httpClient.BaseAddress.Should().Be(new Uri("https://vault.example:8200/"));
-        httpClient.Timeout.Should().Be(TimeSpan.FromSeconds(5));
-        httpClient.DefaultRequestHeaders.GetValues("X-Vault-Token").Should().ContainSingle().Which.Should().Be("hvs.abc");
+        // G1: the token moved from DefaultRequestHeaders to a per-request header stamped by
+        // VaultAuthenticationHandler — a leaked/captured HttpClient no longer carries the secret.
+        httpClient.DefaultRequestHeaders.Contains("X-Vault-Token").Should().BeFalse();
+        // G2: with EnableResilience (the default), the resilience pipeline owns the deadline
+        // (per-attempt timeout = HttpTimeout) and HttpClient.Timeout is set to infinite.
+        // Timeout behavior for both EnableResilience values is pinned in VaultAuthResilienceDiTests.
+        httpClient.Timeout.Should().Be(Timeout.InfiniteTimeSpan);
     }
 
     [Fact]
@@ -297,10 +302,34 @@ public sealed class VaultServiceCollectionExtensionsTests
         using ServiceProvider sp = services.BuildServiceProvider();
         IStartupValidator startupValidator = sp.GetRequiredService<IStartupValidator>();
 
-        Action act = startupValidator.Validate;
+        // Since G2, ValidateOnStart() covers several options pipelines (VaultOptions plus the
+        // two standard-resilience pipelines whose Configure reads VaultOptions), so the startup
+        // validator aggregates one OptionsValidationException per pipeline — all carrying the
+        // same VaultOptions failure. Unwrap rather than assume a single exception.
+        Exception? caught = null;
+        try
+        {
+            startupValidator.Validate();
+        }
+        catch (AggregateException ex)
+        {
+            caught = ex;
+        }
+        catch (OptionsValidationException ex)
+        {
+            caught = ex;
+        }
 
-        act.Should().Throw<OptionsValidationException>()
-            .Where(ex => ex.Failures.Any(f => f.Contains("AllowInsecureHttp", StringComparison.Ordinal)));
+        caught.Should().NotBeNull("start-up validation must fail fast on a plain http:// address");
+        OptionsValidationException[] validationFailures = caught switch
+        {
+            AggregateException aggregate => aggregate.InnerExceptions.OfType<OptionsValidationException>().ToArray(),
+            OptionsValidationException single => [single],
+            _ => [],
+        };
+        validationFailures.Should().NotBeEmpty();
+        validationFailures.SelectMany(ex => ex.Failures)
+            .Should().Contain(f => f.Contains("AllowInsecureHttp", StringComparison.Ordinal));
     }
 
     [Fact]

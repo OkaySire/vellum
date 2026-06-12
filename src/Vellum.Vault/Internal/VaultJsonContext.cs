@@ -19,4 +19,7 @@ namespace Vellum.Vault.Internal;
 [JsonSerializable(typeof(VaultDecryptRequest))]
 [JsonSerializable(typeof(VaultDecryptResponse))]
 [JsonSerializable(typeof(VaultDecryptResponseData))]
+[JsonSerializable(typeof(VaultAppRoleLoginRequest))]
+[JsonSerializable(typeof(VaultAppRoleLoginResponse))]
+[JsonSerializable(typeof(VaultAppRoleLoginAuth))]
 internal sealed partial class VaultJsonContext : JsonSerializerContext;

@@ -33,8 +33,10 @@ namespace Vellum.Vault;
 /// <para>
 /// <b>HttpClient lifetime.</b> The <see cref="HttpClient"/> is supplied by
 /// <see cref="IHttpClientFactory"/> via the typed-client registration in
-/// <c>VaultServiceCollectionExtensions.AddVaultProvider</c>. The base address, timeout, and
-/// <c>X-Vault-Token</c> header are all configured there; this class only issues relative requests.
+/// <c>VaultServiceCollectionExtensions.AddVaultProvider</c>. The base address and timeout are
+/// configured there, and the <c>X-Vault-Token</c> header is stamped per request by
+/// <see cref="VaultAuthenticationHandler"/> in the handler pipeline; this class only issues
+/// relative requests.
 /// </para>
 /// </remarks>
 public sealed partial class VaultKeyEncryptionProvider(
@@ -43,14 +45,6 @@ public sealed partial class VaultKeyEncryptionProvider(
     ILogger<VaultKeyEncryptionProvider> logger) : IKeyEncryptionProvider
 {
     private const string _vaultCiphertextPrefix = "vault:v";
-
-    /// <summary>
-    /// H-2: hard cap on the number of bytes copied from a Vault error response body into log
-    /// entries and exception messages. A malicious or misconfigured Vault (or an interposing
-    /// proxy echoing arbitrary content) could otherwise return megabytes of attacker-controlled
-    /// content that would be embedded verbatim in logs and exceptions.
-    /// </summary>
-    private const int _errorBodyTruncateBytes = 512;
 
     private readonly HttpClient _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
     private readonly VaultOptions _options = (options ?? throw new ArgumentNullException(nameof(options))).Value;
@@ -80,7 +74,7 @@ public sealed partial class VaultKeyEncryptionProvider(
         if (!response.IsSuccessStatusCode)
         {
             string errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            string truncatedBody = TruncateForDiagnostics(errorBody);
+            string truncatedBody = VaultDiagnostics.TruncateForDiagnostics(errorBody);
             LogVaultError(_logger, "encrypt", (int)response.StatusCode, truncatedBody);
             throw new InvalidOperationException(
                 $"Vault Transit encrypt failed with HTTP {(int)response.StatusCode} ({response.StatusCode}): {truncatedBody}");
@@ -139,7 +133,7 @@ public sealed partial class VaultKeyEncryptionProvider(
         if (!response.IsSuccessStatusCode)
         {
             string errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            string truncatedBody = TruncateForDiagnostics(errorBody);
+            string truncatedBody = VaultDiagnostics.TruncateForDiagnostics(errorBody);
             LogVaultError(_logger, "decrypt", (int)response.StatusCode, truncatedBody);
             throw new InvalidOperationException(
                 $"Vault Transit decrypt failed with HTTP {(int)response.StatusCode} ({response.StatusCode}): {truncatedBody}");
@@ -176,30 +170,6 @@ public sealed partial class VaultKeyEncryptionProvider(
 
         LogDecryptSucceeded(_logger, _options.KeyName);
         return dekBytes;
-    }
-
-    /// <summary>
-    /// H-2: truncates an error body to a small, fixed upper bound before embedding it in log
-    /// entries or exception messages. The truncation is by char count, not byte count, which
-    /// is safe because we are only using the result for human-facing diagnostics — never for
-    /// semantic parsing. The explicit "[truncated, N chars]" suffix makes it obvious to
-    /// operators that content was elided.
-    /// </summary>
-    private static string TruncateForDiagnostics(string body)
-    {
-        if (string.IsNullOrEmpty(body))
-        {
-            return string.Empty;
-        }
-
-        if (body.Length <= _errorBodyTruncateBytes)
-        {
-            return body;
-        }
-
-        return string.Create(
-            CultureInfo.InvariantCulture,
-            $"{body.AsSpan(0, _errorBodyTruncateBytes)}... [truncated, original length {body.Length} chars]");
     }
 
     /// <summary>

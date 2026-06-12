@@ -42,10 +42,66 @@ internal sealed class VaultOptionsValidator : IValidateOptions<VaultOptions>
                 "(e.g. against 'vault server -dev').");
         }
 
-        if (string.IsNullOrWhiteSpace(options.Token))
+        // Auth matrix: each method requires exactly its own credentials and forbids the other
+        // method's fields, so a half-migrated configuration fails fast instead of silently
+        // using the wrong credential. Credential VALUES are never echoed in failure messages.
+        switch (options.AuthMethod)
         {
-            // Never include the token value itself in the failure message.
-            failures.Add($"{nameof(VaultOptions.Token)} must be a non-empty Vault auth token.");
+            case VaultAuthMethod.Token:
+                if (string.IsNullOrWhiteSpace(options.Token))
+                {
+                    // Never include the token value itself in the failure message.
+                    failures.Add($"{nameof(VaultOptions.Token)} must be a non-empty Vault auth token when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.Token)}.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(options.RoleId) || !string.IsNullOrWhiteSpace(options.SecretId))
+                {
+                    failures.Add($"{nameof(VaultOptions.RoleId)} and {nameof(VaultOptions.SecretId)} must be empty when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.Token)}; set " +
+                                 $"{nameof(VaultOptions.AuthMethod)} = {nameof(VaultAuthMethod.AppRole)} to use AppRole credentials.");
+                }
+
+                break;
+
+            case VaultAuthMethod.AppRole:
+                if (string.IsNullOrWhiteSpace(options.RoleId))
+                {
+                    failures.Add($"{nameof(VaultOptions.RoleId)} must be non-empty when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.AppRole)}.");
+                }
+
+                if (string.IsNullOrWhiteSpace(options.SecretId))
+                {
+                    failures.Add($"{nameof(VaultOptions.SecretId)} must be non-empty when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.AppRole)}.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(options.Token))
+                {
+                    failures.Add($"{nameof(VaultOptions.Token)} must be empty when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.AppRole)}; the token is " +
+                                 "acquired via AppRole login.");
+                }
+
+                if (string.IsNullOrWhiteSpace(options.AppRoleMount))
+                {
+                    failures.Add($"{nameof(VaultOptions.AppRoleMount)} must be a non-empty AppRole mount path " +
+                                 "(e.g. 'approle').");
+                }
+
+                break;
+
+            default:
+                failures.Add($"{nameof(VaultOptions.AuthMethod)} value '{options.AuthMethod}' is not a recognised " +
+                             $"{nameof(VaultAuthMethod)}.");
+                break;
+        }
+
+        if (options.TokenRenewalThreshold <= 0 || options.TokenRenewalThreshold > 1)
+        {
+            failures.Add($"{nameof(VaultOptions.TokenRenewalThreshold)} must be in (0, 1]; got " +
+                         $"{options.TokenRenewalThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture)}.");
         }
 
         if (string.IsNullOrWhiteSpace(options.KeyName))

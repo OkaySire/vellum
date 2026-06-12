@@ -16,6 +16,11 @@
     <PackageVersion Include="Microsoft.Extensions.Options" Version="9.0.9" />
     <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="9.0.9" />
     <PackageVersion Include="Microsoft.Extensions.Http" Version="9.0.9" />
+    <!-- dotnet/extensions family — versioned 9.N.0 (monthly), not 9.0.N like the runtime
+         extensions above. 9.9.0 is the newest of the 9.x line built against the runtime
+         extensions 9.0.9 pinned above (9.10.0 requires >= 9.0.10 and would force a
+         family-wide bump). -->
+    <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="9.9.0" />
   </ItemGroup>
 
   <ItemGroup Label="EF Core">
