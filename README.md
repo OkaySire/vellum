@@ -8,7 +8,7 @@
 [![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0-512BD4)](https://dotnet.microsoft.com/)
 [![Build & Test](https://github.com/OkaySire/vellum/actions/workflows/build.yml/badge.svg)](https://github.com/OkaySire/vellum/actions/workflows/build.yml)
 
-> **Status: `0.1.0` — First stable drop. Pre-1.0 (API may evolve in 0.2.0+, breaking changes allowed per semver). Production use is supported but cloud KMS providers (Azure Key Vault, AWS KMS, GCP KMS) are planned for 0.3.0.**
+> **Status: `0.2.0` — Pre-1.0 (API may evolve, breaking changes allowed per semver; see [CHANGELOG](CHANGELOG.md) for the 0.2.0 breaking changes). Production use is supported but cloud KMS providers (Azure Key Vault, AWS KMS, GCP KMS) are planned for 0.3.0.**
 
 ---
 
@@ -36,7 +36,7 @@ This pattern lets you rotate keys at the KEK level without re-encrypting every p
 | `Vellum.Static` | Static key provider **for dev/test only — INSECURE**. |
 | `Vellum.EntityFrameworkCore` | EF Core-backed key store. |
 | `Vellum.InMemory` | In-memory key store for tests. |
-| `Vellum.Rotation` | Opt-in background DEK rotation _(Phase 4)_. |
+| `Vellum.Rotation` | Opt-in background DEK rotation hosted service. |
 | `Vellum.AspNetCore` | DI extensions + health checks _(Phase 4)_. |
 
 ## Quickstart
@@ -90,6 +90,27 @@ workloads pay at most one KEK round-trip per distinct DEK.
 For more complete wiring — feature-flagged rollouts, snake_case schemas, migrations
 from a legacy encryption layer, `appsettings.json` bridging — see the
 [`samples/`](samples/) folder and [`docs/consumer-options-bridging.md`](docs/consumer-options-bridging.md).
+
+### Background DEK rotation (`Vellum.Rotation`)
+
+Rotation is opt-in — `Vellum.Core` never starts a background service. Add the
+`Vellum.Rotation` package and register the worker:
+
+```csharp
+services.AddVellumRotation(o =>
+{
+    o.RotationInterval   = TimeSpan.FromHours(24); // how often the worker ticks
+    o.MaxDekAge          = TimeSpan.FromHours(24); // rotate only keys at least this old
+    o.MaxRetriesPerScope = 3;                      // retry with backoff inside the tick
+});
+```
+
+Each tick rotates only the scopes whose active DEK has reached `MaxDekAge`; transient
+KEK-provider failures are retried per scope with exponential backoff and jitter inside
+the tick, and a failed scope never blocks the others. Rotation is fail-safe: if the KEK
+provider fails mid-rotation, the previous key stays active. For the full operational
+picture — including KEK rotation on the Vault side and the `min_decryption_version`
+hazard — see the [key rotation runbook](docs/kek-rotation.md).
 
 ### Design-time scaffolder (`dotnet ef migrations add`)
 

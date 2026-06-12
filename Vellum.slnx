@@ -6,6 +6,7 @@
     <Project Path="src/Vellum.Static/Vellum.Static.csproj" />
     <Project Path="src/Vellum.InMemory/Vellum.InMemory.csproj" />
     <Project Path="src/Vellum.EntityFrameworkCore/Vellum.EntityFrameworkCore.csproj" />
+    <Project Path="src/Vellum.Rotation/Vellum.Rotation.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Vellum.Abstractions.Tests/Vellum.Abstractions.Tests.csproj" />
@@ -14,6 +15,7 @@
     <Project Path="tests/Vellum.Static.Tests/Vellum.Static.Tests.csproj" />
     <Project Path="tests/Vellum.InMemory.Tests/Vellum.InMemory.Tests.csproj" />
     <Project Path="tests/Vellum.EntityFrameworkCore.Tests/Vellum.EntityFrameworkCore.Tests.csproj" />
+    <Project Path="tests/Vellum.Rotation.Tests/Vellum.Rotation.Tests.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Console.Static/Console.Static.csproj" />

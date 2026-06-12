@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-12
+
+Remediation release driven by a full security + rotation review after the VPS
+production incidents. Root cause of the outages: `RotateDekAsync` deactivated the
+old DEK *before* wrapping the new one, with no transaction and no lock — a KEK
+provider failure mid-rotation left scopes with zero active keys.
+
+### Breaking
+
+- **`IEncryptionKeyStore` gains `RotateAsync(EncryptionKey newKey, CancellationToken)`.**
+  Atomically deactivates all active keys for the new key's scope *and* inserts the
+  new active key in a single transaction. On failure nothing changes — the old key
+  stays active. Consumers who implement `IEncryptionKeyStore` directly must
+  implement the new member; `Vellum.EntityFrameworkCore` and `Vellum.InMemory`
+  ship implementations.
+- **`EncryptedPayload` gains a `FormatVersion` field** (5th positional parameter,
+  default `CurrentFormatVersion = 1`). Existing 4-argument construction still
+  compiles and defaults to v1, so persisted pre-0.2.0 envelopes decrypt unchanged.
+  The version is stamped at encrypt and validated fail-closed at decrypt: an
+  unknown version throws `CryptographicException` *before* any KEK round-trip.
+  Consumers persisting envelopes field-by-field should persist `FormatVersion` too.
+- **Plain `http://` Vault addresses are rejected by default.** Over plain HTTP the
+  `X-Vault-Token` header and the base64 plaintext DEKs travel in cleartext. Local
+  development against `vault server -dev` must now opt in explicitly via
+  `VaultOptions.AllowInsecureHttp = true` (logged as a warning on every client
+  construction).
+
+### Fixed
+
+- **Atomic, fail-safe DEK rotation.** `DekManager.RotateDekAsync` now generates and
+  wraps the new DEK *before* touching anything, then swaps the active key via the
+  new `IEncryptionKeyStore.RotateAsync` in one transaction, then replaces (never
+  removes) the cache entry. If Vault or the store fails at any point, the old key
+  remains active *and* cached — the scope is never observed without an active DEK.
+- **Per-scope async lock in `DekManager`** (`SemaphoreSlim` per scope, cache-hit
+  fast path stays lock-free) eliminates three races at once: the cache re-poisoning
+  race where an in-flight slow read re-cached a freshly-deactivated DEK after a
+  rotation, the KEK-provider stampede where N concurrent cache misses each
+  round-tripped to Vault, and the spurious "no concurrent winner" errors from
+  create-vs-rotate interleavings.
+- **`EnsureDekLength` on race-loss paths.** The winner's unwrapped DEK is now
+  length-checked (32 bytes, AES-256) on both the create and rotate race-loss
+  reconciliation paths, symmetric with every other unwrap path.
+- **Encrypt-side DEK length guard.** `PayloadEncryptor` rejects DEKs that are not
+  32 bytes before encrypting, so a buggy or compromised KEK provider cannot
+  silently downgrade payloads to AES-128/192.
+
+### Security
+
+- **Vault token redaction in `HttpClientFactory` logs.** The `X-Vault-Token` header
+  is redacted unconditionally via `RedactLoggedHeaders` on all three TFMs.
+- **Bounded Vault error-body buffering.** `MaxResponseContentBufferSize` = 64 KB on
+  the typed Vault client; an oversized response body fails closed with
+  `HttpRequestException` instead of buffering unbounded attacker-controlled bytes.
+
+### Added
+
+- **`Vellum.Rotation` package** — opt-in background DEK rotation hosted service.
+  `AddVellumRotation(Action<RotationOptions>?)` registers a worker that ticks every
+  `RotationInterval` (default 24 h), rotates only scopes whose active key is older
+  than `MaxDekAge` (default 24 h — no unconditional rotation, no synchronized
+  churn), and retries failed scopes with exponential backoff + jitter *within* the
+  tick (`MaxRetriesPerScope`, default 3; `RetryBaseDelay`, default 5 s) so a Vault
+  blip does not postpone a rotation by a full interval. One scope failing never
+  aborts the others, and a `StartupDelay` (default 1 min) keeps the worker from
+  hammering the KEK provider at boot. Options validated via `ValidateOnStart()`.
+- **`docs/kek-rotation.md`** — operational runbook: DEK vs KEK rotation, why Vault
+  Transit KEK rotation is safe by default, the fail-safe Vault-down behaviour, and
+  the **`min_decryption_version` hazard** (every persisted envelope embeds its own
+  wrapped DEK; bumping the minimum above any persisted version makes those payloads
+  permanently undecryptable — rule until rewrap tooling ships: do not bump).
+
+### Tests
+
+207 → 237 tests per TFM (711 across net8.0/net9.0/net10.0), all green.
+Per-project breakdown (per TFM): `Abstractions 9`, `Core 57`, `EntityFrameworkCore 37`,
+`Static 24`, `InMemory 37`, `Vault 43`, `Rotation 30` (new).
+
 ## [0.1.0] — 2026-04-13
 
 ### Stabilized
@@ -202,7 +280,8 @@ First public preview published to nuget.org. Phase 1 scaffold + `Vellum.Abstract
 - 150 tests green on net10.0 (compile-only on net8.0 / net9.0).
 - Audit remediation: 3 High, 7 Medium, 9 Low actionable findings fixed.
 
-[Unreleased]: https://github.com/OkaySire/vellum/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/OkaySire/vellum/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/OkaySire/vellum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.4...v0.1.0
 [0.1.0-preview.4]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.3...v0.1.0-preview.4
 [0.1.0-preview.3]: https://github.com/OkaySire/vellum/compare/v0.1.0-preview.2...v0.1.0-preview.3
