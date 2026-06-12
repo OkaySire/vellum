@@ -9,11 +9,14 @@ namespace Vellum;
 /// <remarks>
 /// <para>
 /// <see cref="AddVellum"/> wires up <see cref="IDekManager"/>, <see cref="IPayloadEncryptor"/>,
-/// <see cref="IRandomBytesProvider"/> and <see cref="TimeProvider"/> — plus the in-memory cache
-/// used on the hot path. It does <b>not</b> register an <see cref="IKeyEncryptionProvider"/>
-/// or an <see cref="IEncryptionKeyStore"/>; consumers are expected to pull in a provider
-/// package (for example, <c>Vellum.Vault</c>) and a storage package (for example,
-/// <c>Vellum.EntityFrameworkCore</c>) and call their respective registration extensions.
+/// <see cref="IRandomBytesProvider"/> and <see cref="TimeProvider"/> — plus the Vellum-owned
+/// <see cref="VellumDekCache"/> used on the hot path. It deliberately does <b>not</b> register
+/// or touch the application's shared <c>IMemoryCache</c>: plaintext DEKs live in a dedicated
+/// cache that only Vellum can reach (M-C). It also does <b>not</b> register an
+/// <see cref="IKeyEncryptionProvider"/> or an <see cref="IEncryptionKeyStore"/>; consumers are
+/// expected to pull in a provider package (for example, <c>Vellum.Vault</c>) and a storage
+/// package (for example, <c>Vellum.EntityFrameworkCore</c>) and call their respective
+/// registration extensions.
 /// </para>
 /// <para>
 /// The method uses <see cref="ServiceCollectionDescriptorExtensions.TryAdd(IServiceCollection, ServiceDescriptor)"/>
@@ -42,7 +45,12 @@ public static class VellumServiceCollectionExtensions
             services.Configure(configureOptions);
         }
 
-        services.AddMemoryCache();
+        // M-C: the DEK cache is a Vellum-owned singleton, NEVER the application's shared
+        // IMemoryCache — arbitrary in-process code resolving IMemoryCache must not be able to
+        // read plaintext DEKs, and consumer SizeLimit budgeting/compaction must not evict them.
+        // Singleton so cached DEKs survive across DI scopes (DekManager itself stays scoped for
+        // EF-backed stores); the container disposes it on shutdown, scrubbing remaining entries.
+        services.TryAddSingleton<VellumDekCache>();
 
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<IRandomBytesProvider, DefaultRandomBytesProvider>();

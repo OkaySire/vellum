@@ -84,6 +84,7 @@ app.MapPost("/notes", async (
         WrappedCiphertext = envelope.WrappedDek.Ciphertext,
         WrappedProviderVersion = envelope.WrappedDek.ProviderVersion,
         KeyId = envelope.KeyId,
+        FormatVersion = envelope.FormatVersion,
     };
     db.SecretNotes.Add(note);
     await db.SaveChangesAsync();
@@ -106,9 +107,12 @@ app.MapGet("/notes/{id:guid}", async (
         Ciphertext: note.Ciphertext,
         Nonce: note.Nonce,
         WrappedDek: new WrappedKey(note.WrappedCiphertext, note.WrappedProviderVersion),
-        KeyId: note.KeyId);
+        KeyId: note.KeyId,
+        FormatVersion: note.FormatVersion);
 
-    byte[] plaintext = await encryptor.DecryptAsync(envelope);
+    // Version 2 envelopes are scope-bound: the same scope used at encryption time is
+    // required to decrypt (wrong scope => AES-GCM tag failure, fail closed).
+    byte[] plaintext = await encryptor.DecryptAsync(envelope, note.Scope);
     return Results.Ok(new { note.Id, Text = Encoding.UTF8.GetString(plaintext) });
 });
 

@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -8,8 +7,8 @@ namespace Vellum;
 
 /// <summary>
 /// Default <see cref="IDekManager"/> implementation: caches unwrapped Data Encryption Keys in
-/// <see cref="IMemoryCache"/>, coordinates <see cref="IKeyEncryptionProvider"/> and
-/// <see cref="IEncryptionKeyStore"/>, and handles race conditions on DEK creation.
+/// a Vellum-owned <see cref="VellumDekCache"/>, coordinates <see cref="IKeyEncryptionProvider"/>
+/// and <see cref="IEncryptionKeyStore"/>, and handles race conditions on DEK creation.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -22,6 +21,14 @@ namespace Vellum;
 /// but every public return path returns a clone (fresh <see cref="Dek.Key"/> byte array). Callers
 /// are free to <see cref="CryptographicOperations.ZeroMemory(Span{byte})"/> their copy without
 /// corrupting the cache. See <c>tasks/lessons.md</c> L3.
+/// </para>
+/// <para>
+/// <b>Dedicated cache (M-C).</b> DEKs live in a Vellum-owned <see cref="VellumDekCache"/>, never
+/// in the application's shared <c>IMemoryCache</c>: arbitrary in-process code cannot read the
+/// plaintext entries, consumer SizeLimit budgeting cannot evict them, and every entry is zeroed
+/// on eviction. The <c>Cache*</c> helpers return whether the cache took ownership of the key
+/// bytes; when caching is disabled (<see cref="VellumOptions.DekCacheTtl"/> &lt;= 0) the caller
+/// zeroes its source array after cloning the returned copy (L-A).
 /// </para>
 /// <para>
 /// <b>Race-safe creation (L2).</b> <see cref="CreateDekAsync"/> applies a four-layer defense:
@@ -48,7 +55,7 @@ namespace Vellum;
 public sealed partial class DekManager(
     IKeyEncryptionProvider keyProvider,
     IEncryptionKeyStore store,
-    IMemoryCache cache,
+    VellumDekCache cache,
     IRandomBytesProvider randomBytes,
     TimeProvider timeProvider,
     IOptions<VellumOptions> options,
@@ -58,7 +65,7 @@ public sealed partial class DekManager(
 
     private readonly IKeyEncryptionProvider _keyProvider = keyProvider ?? throw new ArgumentNullException(nameof(keyProvider));
     private readonly IEncryptionKeyStore _store = store ?? throw new ArgumentNullException(nameof(store));
-    private readonly IMemoryCache _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+    private readonly VellumDekCache _cache = cache ?? throw new ArgumentNullException(nameof(cache));
     private readonly IRandomBytesProvider _randomBytes = randomBytes ?? throw new ArgumentNullException(nameof(randomBytes));
     private readonly TimeProvider _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
     private readonly VellumOptions _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
@@ -83,7 +90,7 @@ public sealed partial class DekManager(
     {
         ArgumentNullException.ThrowIfNull(scope);
 
-        if (_cache.TryGetValue(BuildActiveCacheKey(scope), out Dek? cached) && cached is not null)
+        if (_cache.TryGetValue(BuildActiveCacheKey(scope), out Dek? cached))
         {
             LogDekCacheHit(_logger, scope);
             return new ValueTask<Dek>(CloneDek(cached));
@@ -181,8 +188,17 @@ public sealed partial class DekManager(
             active = new Dek(winnerBytes, persisted.KeyId, persisted.WrappedKey);
         }
 
-        CacheActiveDek(scope, active);
-        return CloneDek(active);
+        // Clone BEFORE the ownership handoff below: when caching is disabled the source array
+        // is zeroed, and the returned Dek must carry an independent copy (L3).
+        Dek result = CloneDek(active);
+        if (!CacheActiveDek(scope, active))
+        {
+            // L-A: caching disabled — nothing else references active.Key (`result` holds a
+            // clone), so scrub the plaintext instead of abandoning it on the managed heap.
+            CryptographicOperations.ZeroMemory(active.Key);
+        }
+
+        return result;
     }
 
     /// <inheritdoc />
@@ -258,7 +274,15 @@ public sealed partial class DekManager(
 
             // Replace (never Remove-then-repopulate) the active cache entry: _cache.Set swaps the
             // entry in place so readers either see the old DEK or the new one — never a miss.
-            CacheActiveDek(scope, active);
+            // The replaced entry's eviction callback zeroes the OLD array; the by-id entry for
+            // the old key holds its own clone and keeps serving historical decrypts (L-4).
+            if (!CacheActiveDek(scope, active))
+            {
+                // L-A: caching disabled — RotateDekAsync returns nothing, so no caller
+                // references active.Key; scrub the plaintext instead of abandoning it.
+                CryptographicOperations.ZeroMemory(active.Key);
+            }
+
             LogDekRotated(_logger, scope);
         }
         finally
@@ -273,7 +297,7 @@ public sealed partial class DekManager(
         ArgumentNullException.ThrowIfNull(wrappedKey);
 
         string cacheKey = BuildWrappedCacheKey(wrappedKey);
-        if (_cache.TryGetValue(cacheKey, out Dek? cached) && cached is not null)
+        if (_cache.TryGetValue(cacheKey, out Dek? cached))
         {
             LogDekWrappedCacheHit(_logger);
             return new ValueTask<Dek>(CloneDek(cached));
@@ -288,7 +312,7 @@ public sealed partial class DekManager(
         ArgumentNullException.ThrowIfNull(scope);
 
         string cacheKey = BuildKeyIdCacheKey(keyId, scope);
-        if (_cache.TryGetValue(cacheKey, out Dek? cached) && cached is not null)
+        if (_cache.TryGetValue(cacheKey, out Dek? cached))
         {
             // L-3: belt-and-braces re-verification on the fast path. The cache key is already
             // scope-partitioned (see L15) AND includes the keyId, so a mismatch here should
@@ -318,7 +342,7 @@ public sealed partial class DekManager(
             // store or KEK-provider round-trip. This also closes the re-poisoning race: a slow
             // read can no longer interleave with RotateDekAsync and re-cache a deactivated DEK,
             // because rotation holds the same lock.
-            if (_cache.TryGetValue(BuildActiveCacheKey(scope), out Dek? cached) && cached is not null)
+            if (_cache.TryGetValue(BuildActiveCacheKey(scope), out Dek? cached))
             {
                 LogDekCacheHit(_logger, scope);
                 return CloneDek(cached);
@@ -362,9 +386,17 @@ public sealed partial class DekManager(
         // off EncryptedPayload directly.
         Dek dek = new(dekBytes, Guid.Empty, wrappedKey);
 
-        CacheByWrappedKey(cacheKey, dek);
+        // Clone BEFORE the ownership handoff: when caching is disabled the source array is
+        // zeroed, and the returned Dek must carry an independent copy (L3).
+        Dek result = CloneDek(dek);
+        if (!CacheByWrappedKey(cacheKey, dek))
+        {
+            // L-A: caching disabled — `result` holds a clone, so scrub the unwrapped source.
+            CryptographicOperations.ZeroMemory(dekBytes);
+        }
+
         LogDekWrappedLoadedAndCached(_logger);
-        return CloneDek(dek);
+        return result;
     }
 
     private async Task<Dek> GetDekByKeyIdSlowAsync(Guid keyId, string scope, CancellationToken cancellationToken)
@@ -392,9 +424,17 @@ public sealed partial class DekManager(
         EnsureDekLength(dekBytes);
         Dek dek = new(dekBytes, persisted.KeyId, persisted.WrappedKey);
 
-        CacheByKeyId(scope, dek);
+        // Clone BEFORE the ownership handoff: when caching is disabled the source array is
+        // zeroed, and the returned Dek must carry an independent copy (L3).
+        Dek result = CloneDek(dek);
+        if (!CacheByKeyId(scope, dek))
+        {
+            // L-A: caching disabled — `result` holds a clone, so scrub the unwrapped source.
+            CryptographicOperations.ZeroMemory(dekBytes);
+        }
+
         LogDekLoadedFromStore(_logger, scope);
-        return CloneDek(dek);
+        return result;
     }
 
     private async Task<Dek> LoadAndCacheAsync(EncryptionKey persisted, CancellationToken cancellationToken)
@@ -403,9 +443,17 @@ public sealed partial class DekManager(
         EnsureDekLength(dekBytes);
         Dek dek = new(dekBytes, persisted.KeyId, persisted.WrappedKey);
 
-        CacheActiveDek(persisted.Scope, dek);
+        // Clone BEFORE the ownership handoff: when caching is disabled the source array is
+        // zeroed, and the returned Dek must carry an independent copy (L3).
+        Dek result = CloneDek(dek);
+        if (!CacheActiveDek(persisted.Scope, dek))
+        {
+            // L-A: caching disabled — `result` holds a clone, so scrub the unwrapped source.
+            CryptographicOperations.ZeroMemory(dekBytes);
+        }
+
         LogDekLoadedFromStore(_logger, persisted.Scope);
-        return CloneDek(dek);
+        return result;
     }
 
     /// <summary>
@@ -425,50 +473,60 @@ public sealed partial class DekManager(
         }
     }
 
-    private void CacheActiveDek(string scope, Dek dek)
+    /// <summary>
+    /// Caches <paramref name="dek"/> under the active-scope key and (a clone of it) under the
+    /// by-id key. Returns whether the cache took ownership of <paramref name="dek"/>'s key
+    /// bytes: when it returns <see langword="false"/> (caching disabled via
+    /// <see cref="VellumOptions.DekCacheTtl"/>), the caller still owns <see cref="Dek.Key"/>
+    /// and must zero it after cloning whatever it returns (L-A).
+    /// </summary>
+    private bool CacheActiveDek(string scope, Dek dek)
     {
         if (_options.DekCacheTtl <= TimeSpan.Zero)
         {
-            return;
+            return false;
         }
 
-        MemoryCacheEntryOptions entryOptions = new()
-        {
-            AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
-            Size = 1, // L25: required when consumer configures IMemoryCache with SizeLimit
-        };
-        _cache.Set(BuildActiveCacheKey(scope), dek, entryOptions);
-        _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), dek, entryOptions);
+        // The two entries must NEVER share the same byte[]: each entry's eviction callback
+        // (installed by VellumDekCache.Set) zeroes its own array, and the active entry is
+        // replaced (= evicted) on every rotation while the by-id entry must keep serving
+        // historical decrypts (L-4). A shared array would be scrubbed out from under the
+        // by-id entry on the first rotation.
+        _cache.Set(BuildActiveCacheKey(scope), dek, _options.DekCacheTtl);
+        _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), CloneDek(dek), _options.DekCacheTtl);
+        return true;
     }
 
-    private void CacheByWrappedKey(string cacheKey, Dek dek)
+    /// <summary>
+    /// Caches <paramref name="dek"/> under the wrapped-ciphertext-hash key, transferring
+    /// ownership of its key bytes to the cache. Returns <see langword="false"/> when caching
+    /// is disabled — the caller then still owns <see cref="Dek.Key"/> and must zero it (L-A).
+    /// </summary>
+    private bool CacheByWrappedKey(string cacheKey, Dek dek)
     {
         if (_options.DekCacheTtl <= TimeSpan.Zero)
         {
-            return;
+            return false;
         }
 
-        MemoryCacheEntryOptions entryOptions = new()
-        {
-            AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
-            Size = 1, // L25: required when consumer configures IMemoryCache with SizeLimit
-        };
-        _cache.Set(cacheKey, dek, entryOptions);
+        _cache.Set(cacheKey, dek, _options.DekCacheTtl);
+        return true;
     }
 
-    private void CacheByKeyId(string scope, Dek dek)
+    /// <summary>
+    /// Caches <paramref name="dek"/> under the scope-partitioned by-id key (L15), transferring
+    /// ownership of its key bytes to the cache. Returns <see langword="false"/> when caching
+    /// is disabled — the caller then still owns <see cref="Dek.Key"/> and must zero it (L-A).
+    /// </summary>
+    private bool CacheByKeyId(string scope, Dek dek)
     {
         if (_options.DekCacheTtl <= TimeSpan.Zero)
         {
-            return;
+            return false;
         }
 
-        MemoryCacheEntryOptions entryOptions = new()
-        {
-            AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
-            Size = 1, // L25: required when consumer configures IMemoryCache with SizeLimit
-        };
-        _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), dek, entryOptions);
+        _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), dek, _options.DekCacheTtl);
+        return true;
     }
 
     private static Dek CloneDek(Dek source) =>

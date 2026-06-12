@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using FluentAssertions;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Vellum.Tests.Fakes;
@@ -16,13 +15,13 @@ public sealed class DekManagerTests
         out FakeKeyEncryptionProvider provider,
         out FakeEncryptionKeyStore store,
         out CountingRandomBytesProvider randomBytes,
-        out IMemoryCache cache,
+        out VellumDekCache cache,
         TimeSpan? dekCacheTtl = null)
     {
         provider = new FakeKeyEncryptionProvider();
         store = new FakeEncryptionKeyStore();
         randomBytes = new CountingRandomBytesProvider();
-        cache = new MemoryCache(new MemoryCacheOptions());
+        cache = new VellumDekCache();
         VellumOptions options = new();
         if (dekCacheTtl is not null)
         {
@@ -42,7 +41,7 @@ public sealed class DekManagerTests
     [Fact]
     public async Task GetActiveDekAsync_WhenNoKey_CreatesNewDek()
     {
-        DekManager sut = BuildSut(out FakeKeyEncryptionProvider provider, out FakeEncryptionKeyStore store, out CountingRandomBytesProvider random, out IMemoryCache cache);
+        DekManager sut = BuildSut(out FakeKeyEncryptionProvider provider, out FakeEncryptionKeyStore store, out CountingRandomBytesProvider random, out VellumDekCache cache);
 
         Dek dek = await sut.GetActiveDekAsync(Scope);
 
@@ -135,7 +134,7 @@ public sealed class DekManagerTests
         // the double-check and the insert.
         RaceStore raceStore = new();
         VellumOptions options = new();
-        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumDekCache cache = new();
         DekManager racingSut = new(
             provider,
             raceStore,
@@ -190,7 +189,7 @@ public sealed class DekManagerTests
     {
         // A2: rotation must atomically REPLACE the active cache entry (_cache.Set) rather than
         // Remove-then-repopulate — readers either see the old DEK or the new one, never a miss.
-        DekManager sut = BuildSut(out _, out _, out _, out IMemoryCache cache);
+        DekManager sut = BuildSut(out _, out _, out _, out VellumDekCache cache);
 
         await sut.GetActiveDekAsync(Scope);
         cache.TryGetValue($"vellum:dek:active:{Scope}", out Dek? before).Should().BeTrue();
@@ -212,7 +211,7 @@ public sealed class DekManagerTests
         FakeKeyEncryptionProvider inner = new();
         FailingWrapProvider provider = new(inner);
         FakeEncryptionKeyStore store = new();
-        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumDekCache cache = new();
         DekManager sut = new(
             provider,
             store,
@@ -390,7 +389,7 @@ public sealed class DekManagerTests
         _ = BuildSut(out FakeKeyEncryptionProvider provider, out _, out _, out _);
 
         RaceStore raceStore = new();
-        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumDekCache cache = new();
         DekManager racingSut = new(
             provider,
             raceStore,
@@ -425,7 +424,7 @@ public sealed class DekManagerTests
         DekManager racingSut = new(
             provider,
             raceStore,
-            new MemoryCache(new MemoryCacheOptions()),
+            new VellumDekCache(),
             new CountingRandomBytesProvider(),
             TimeProvider.System,
             Options.Create(new VellumOptions()),
@@ -450,7 +449,7 @@ public sealed class DekManagerTests
         DekManager racingSut = new(
             provider,
             raceStore,
-            new MemoryCache(new MemoryCacheOptions()),
+            new VellumDekCache(),
             new CountingRandomBytesProvider(),
             TimeProvider.System,
             Options.Create(new VellumOptions()),
@@ -548,7 +547,7 @@ public sealed class DekManagerTests
         // through the normal API — but we want to prove the invariant holds if someone
         // manually pokes a bad entry into the cache. Poison the cache with a DEK whose
         // KeyId differs from the lookup key; the fast path must throw.
-        DekManager sut = BuildSut(out _, out _, out _, out IMemoryCache cache);
+        DekManager sut = BuildSut(out _, out _, out _, out VellumDekCache cache);
 
         Guid requestedKeyId = Guid.NewGuid();
         Dek poisoned = new(
@@ -558,7 +557,7 @@ public sealed class DekManagerTests
 
         // Reach into the cache-key builder via the exact format the manager uses.
         string cacheKey = $"vellum:dek:id:{Scope}:{requestedKeyId}";
-        cache.Set(cacheKey, poisoned);
+        cache.Set(cacheKey, poisoned, TimeSpan.FromMinutes(5));
 
         Func<Task> act = async () => await sut.GetDekByKeyIdAsync(requestedKeyId, Scope);
 
@@ -575,7 +574,7 @@ public sealed class DekManagerTests
         ShortDekProvider shortProvider = new(dekBytesLength: 16);
         FakeEncryptionKeyStore store = new();
         CountingRandomBytesProvider random = new();
-        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumDekCache cache = new();
         VellumOptions options = new();
 
         DekManager sut = new(
@@ -610,7 +609,7 @@ public sealed class DekManagerTests
         ShortDekProvider shortProvider = new(dekBytesLength: 24);
         FakeEncryptionKeyStore store = new();
         CountingRandomBytesProvider random = new();
-        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumDekCache cache = new();
         VellumOptions options = new();
 
         DekManager sut = new(
@@ -731,97 +730,86 @@ public sealed class DekManagerTests
     }
 
     [Fact]
-    public async Task GetActiveDekAsync_WithSizeLimitedCache_DoesNotThrow()
+    public async Task GetActiveDekAsync_CachingDisabled_ZeroesInternalUnwrappedArray()
     {
-        // L25: production crash — consumers who configure IMemoryCache with SizeLimit
-        // trigger InvalidOperationException if cache entries don't specify Size.
-        FakeKeyEncryptionProvider provider = new();
+        // L-A: when DekCacheTtl <= 0 the Cache* helpers refuse the entry; the manager must
+        // then zero its internal source array (the exact byte[] the KEK provider returned
+        // from UnwrapAsync) instead of abandoning the plaintext on the managed heap. The
+        // returned Dek is an independent clone and must stay intact.
+        CapturingUnwrapProvider provider = new();
         FakeEncryptionKeyStore store = new();
-        CountingRandomBytesProvider random = new();
-        MemoryCache cache = new(new MemoryCacheOptions { SizeLimit = 100 });
-        VellumOptions options = new();
-
         DekManager sut = new(
             provider,
             store,
-            cache,
-            random,
+            new VellumDekCache(),
+            new CountingRandomBytesProvider(),
             TimeProvider.System,
-            Options.Create(options),
-            NullLogger<DekManager>.Instance);
-
-        Dek dek = await sut.GetActiveDekAsync(Scope);
-
-        dek.Should().NotBeNull();
-        dek.Key.Should().HaveCount(32);
-
-        // Second call hits the cache — must also not throw.
-        Dek cached = await sut.GetActiveDekAsync(Scope);
-        cached.KeyId.Should().Be(dek.KeyId);
-    }
-
-    [Fact]
-    public async Task GetDekByKeyIdAsync_WithSizeLimitedCache_DoesNotThrow()
-    {
-        // L25: the by-id cache path must also specify Size on cache entries.
-        FakeKeyEncryptionProvider provider = new();
-        FakeEncryptionKeyStore store = new();
-        CountingRandomBytesProvider random = new();
-        MemoryCache cache = new(new MemoryCacheOptions { SizeLimit = 100 });
-        VellumOptions options = new();
-
-        DekManager sut = new(
-            provider,
-            store,
-            cache,
-            random,
-            TimeProvider.System,
-            Options.Create(options),
-            NullLogger<DekManager>.Instance);
-
-        // Create a key first so we have a KeyId to look up.
-        Dek created = await sut.GetActiveDekAsync(Scope);
-
-        // Evict the cache to force the slow path through CacheByKeyId.
-        cache.Remove($"vellum:dek:id:{Scope}:{created.KeyId}");
-
-        Dek retrieved = await sut.GetDekByKeyIdAsync(created.KeyId, Scope);
-
-        retrieved.Should().NotBeNull();
-        retrieved.KeyId.Should().Be(created.KeyId);
-    }
-
-    [Fact]
-    public async Task GetDekByWrappedKeyAsync_WithSizeLimitedCache_DoesNotThrow()
-    {
-        // L25: the wrapped-key cache path must also specify Size on cache entries.
-        FakeKeyEncryptionProvider provider = new();
-        FakeEncryptionKeyStore store = new();
-        CountingRandomBytesProvider random = new();
-        MemoryCache cache = new(new MemoryCacheOptions { SizeLimit = 100 });
-        VellumOptions options = new();
-
-        DekManager sut = new(
-            provider,
-            store,
-            cache,
-            random,
-            TimeProvider.System,
-            Options.Create(options),
+            Options.Create(new VellumOptions { DekCacheTtl = TimeSpan.Zero }),
             NullLogger<DekManager>.Instance);
 
         byte[] plaintext = new byte[32];
-        plaintext[0] = 0xCA;
+        plaintext[0] = 0x7E;
+        WrappedKey wrapped = await provider.WrapAsync(plaintext);
+        store.SeedKey(new EncryptionKey(Guid.NewGuid(), Scope, wrapped, DateTimeOffset.UtcNow, null, true));
+
+        Dek dek = await sut.GetActiveDekAsync(Scope);
+
+        dek.Key[0].Should().Be(0x7E, "the returned Dek must be a valid independent clone");
+        provider.UnwrappedArrays.Should().ContainSingle()
+            .Which.Should().OnlyContain(b => b == 0, "the manager-internal source array must be scrubbed");
+    }
+
+    [Fact]
+    public async Task GetDekByKeyIdAsync_CachingDisabled_ZeroesInternalUnwrappedArray()
+    {
+        // L-A symmetry on the by-id slow path.
+        CapturingUnwrapProvider provider = new();
+        FakeEncryptionKeyStore store = new();
+        DekManager sut = new(
+            provider,
+            store,
+            new VellumDekCache(),
+            new CountingRandomBytesProvider(),
+            TimeProvider.System,
+            Options.Create(new VellumOptions { DekCacheTtl = TimeSpan.Zero }),
+            NullLogger<DekManager>.Instance);
+
+        byte[] plaintext = new byte[32];
+        plaintext[0] = 0x5C;
+        WrappedKey wrapped = await provider.WrapAsync(plaintext);
+        EncryptionKey seeded = new(Guid.NewGuid(), Scope, wrapped, DateTimeOffset.UtcNow, null, true);
+        store.SeedKey(seeded);
+
+        Dek dek = await sut.GetDekByKeyIdAsync(seeded.KeyId, Scope);
+
+        dek.Key[0].Should().Be(0x5C, "the returned Dek must be a valid independent clone");
+        provider.UnwrappedArrays.Should().ContainSingle()
+            .Which.Should().OnlyContain(b => b == 0, "the manager-internal source array must be scrubbed");
+    }
+
+    [Fact]
+    public async Task GetDekByWrappedKeyAsync_CachingDisabled_ZeroesInternalUnwrappedArray()
+    {
+        // L-A symmetry on the wrapped-key slow path.
+        CapturingUnwrapProvider provider = new();
+        DekManager sut = new(
+            provider,
+            new FakeEncryptionKeyStore(),
+            new VellumDekCache(),
+            new CountingRandomBytesProvider(),
+            TimeProvider.System,
+            Options.Create(new VellumOptions { DekCacheTtl = TimeSpan.Zero }),
+            NullLogger<DekManager>.Instance);
+
+        byte[] plaintext = new byte[32];
+        plaintext[0] = 0x99;
         WrappedKey wrapped = await provider.WrapAsync(plaintext);
 
-        Dek first = await sut.GetDekByWrappedKeyAsync(wrapped);
+        Dek dek = await sut.GetDekByWrappedKeyAsync(wrapped);
 
-        first.Should().NotBeNull();
-        first.Key.Should().Equal(plaintext);
-
-        // Second call hits the cache — must also not throw.
-        Dek cached = await sut.GetDekByWrappedKeyAsync(wrapped);
-        cached.Key.Should().Equal(plaintext);
+        dek.Key[0].Should().Be(0x99, "the returned Dek must be a valid independent clone");
+        provider.UnwrappedArrays.Should().ContainSingle()
+            .Which.Should().OnlyContain(b => b == 0, "the manager-internal source array must be scrubbed");
     }
 
     [Fact]
@@ -842,7 +830,7 @@ public sealed class DekManagerTests
         ShortDekProvider shortProvider = new(dekBytesLength: 16);
         FakeEncryptionKeyStore store = new();
         CountingRandomBytesProvider random = new();
-        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumDekCache cache = new();
         VellumOptions options = new();
 
         DekManager sut = new(
@@ -878,6 +866,29 @@ public sealed class DekManagerTests
 
         public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
             => inner.UnwrapAsync(wrappedKey, cancellationToken);
+    }
+
+    /// <summary>
+    /// Delegating provider that records the exact <see cref="byte"/>[] instances it returned
+    /// from <see cref="UnwrapAsync"/>, so tests can assert the manager scrubbed them (L-A).
+    /// </summary>
+    private sealed class CapturingUnwrapProvider : IKeyEncryptionProvider
+    {
+        private readonly FakeKeyEncryptionProvider _inner = new();
+
+        public List<byte[]> UnwrappedArrays { get; } = new();
+
+        public string ProviderName => "capturing-fake";
+
+        public Task<WrappedKey> WrapAsync(ReadOnlyMemory<byte> dek, CancellationToken cancellationToken = default)
+            => _inner.WrapAsync(dek, cancellationToken);
+
+        public async Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+        {
+            byte[] bytes = await _inner.UnwrapAsync(wrappedKey, cancellationToken);
+            UnwrappedArrays.Add(bytes);
+            return bytes;
+        }
     }
 
     private sealed class ShortDekProvider(int dekBytesLength) : IKeyEncryptionProvider

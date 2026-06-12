@@ -16,9 +16,16 @@ namespace Vellum;
 /// </list>
 /// <para>
 /// <b>Symmetry.</b> The encrypt and decrypt signatures are symmetric: <see cref="EncryptAsync"/>
-/// returns an <see cref="EncryptedPayload"/>, and <see cref="DecryptAsync"/> takes the same
-/// <see cref="EncryptedPayload"/> unchanged. There is no intermediate DTO or hand-rolled
-/// base64 conversion.
+/// takes the plaintext plus the scope and returns an <see cref="EncryptedPayload"/>;
+/// <see cref="DecryptAsync"/> takes the same <see cref="EncryptedPayload"/> unchanged plus the
+/// same scope. There is no intermediate DTO or hand-rolled base64 conversion.
+/// </para>
+/// <para>
+/// <b>Scope binding.</b> Format version 2 envelopes (the default, see
+/// <see cref="EncryptedPayload.ScopeBoundFormatVersion"/>) bind the ciphertext to its scope via
+/// AES-GCM associated data. The scope passed to <see cref="DecryptAsync"/> must therefore match
+/// the scope used at encryption time — a mismatch fails the authentication tag check. Legacy
+/// format version 1 envelopes carry no binding and decrypt regardless of the scope argument.
 /// </para>
 /// <para>
 /// <b>Binary-first.</b> The primary API operates on <see cref="ReadOnlyMemory{T}"/> and
@@ -66,10 +73,17 @@ public interface IPayloadEncryptor
     /// Decrypts a previously-encrypted payload.
     /// </summary>
     /// <param name="payload">The self-contained envelope produced by a prior call to <see cref="EncryptAsync(System.ReadOnlyMemory{byte}, string, System.Threading.CancellationToken)"/>.</param>
+    /// <param name="scope">
+    /// The scope the envelope was encrypted under. <b>Required</b> (non-empty) for format
+    /// version 2 envelopes, which bind the ciphertext to the scope via AES-GCM associated
+    /// data — a missing scope fails closed before any KEK round-trip, and a wrong scope fails
+    /// the authentication tag check. Ignored for legacy format version 1 envelopes, which
+    /// carry no binding and decrypt regardless of this argument.
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The original plaintext bytes. Callers own this array and should zero it out if it contains sensitive data.</returns>
-    /// <exception cref="System.Security.Cryptography.CryptographicException">Thrown when the ciphertext is corrupted, tampered with, or does not match the authentication tag.</exception>
+    /// <exception cref="System.Security.Cryptography.CryptographicException">Thrown when the envelope format version is unsupported, when <paramref name="scope"/> is missing for a format version 2 envelope, or when the ciphertext is corrupted, tampered with, bound to a different scope, or does not match the authentication tag.</exception>
     /// <exception cref="System.InvalidOperationException">Thrown when <see cref="IsEnabled"/> is <see langword="false"/> or the wrapped DEK cannot be unwrapped.</exception>
     /// <exception cref="System.OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is cancelled.</exception>
-    public Task<byte[]> DecryptAsync(EncryptedPayload payload, CancellationToken cancellationToken = default);
+    public Task<byte[]> DecryptAsync(EncryptedPayload payload, string scope, CancellationToken cancellationToken = default);
 }

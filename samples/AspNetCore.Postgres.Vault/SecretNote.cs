@@ -25,4 +25,11 @@ public sealed class SecretNote
 
     /// <summary>Audit-only identifier for the DEK — decryption does not require it.</summary>
     public Guid KeyId { get; set; }
+
+    /// <summary>
+    /// Envelope wire-format version (<see cref="EncryptedPayload.FormatVersion"/>). Consumers
+    /// that persist envelopes field-by-field MUST store this and restore it verbatim —
+    /// version 2 envelopes bind the ciphertext to its scope via AES-GCM associated data.
+    /// </summary>
+    public int FormatVersion { get; set; } = EncryptedPayload.UnboundFormatVersion;
 }

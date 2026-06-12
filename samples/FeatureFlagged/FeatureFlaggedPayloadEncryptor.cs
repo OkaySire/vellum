@@ -69,6 +69,7 @@ public sealed class FeatureFlaggedPayloadEncryptor(
 
     public Task<byte[]> DecryptAsync(
         EncryptedPayload payload,
+        string scope,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(payload);
@@ -82,6 +83,6 @@ public sealed class FeatureFlaggedPayloadEncryptor(
             return Task.FromResult((byte[])payload.Ciphertext.Clone());
         }
 
-        return _inner.DecryptAsync(payload, cancellationToken);
+        return _inner.DecryptAsync(payload, scope, cancellationToken);
     }
 }

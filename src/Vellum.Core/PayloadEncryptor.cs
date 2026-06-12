@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Vellum;
 
@@ -26,18 +28,35 @@ namespace Vellum;
 /// <see cref="IKeyEncryptionProvider.UnwrapAsync"/> are zeroed in a <c>finally</c> block after
 /// the AES-GCM operation completes, whether it succeeds or throws.
 /// </para>
+/// <para>
+/// <b>Scope binding (M-B).</b> When <see cref="VellumOptions.BindScopeToCiphertext"/> is
+/// <see langword="true"/> (the default), <see cref="EncryptAsync"/> produces format version 2
+/// envelopes whose AES-GCM associated data binds the ciphertext to its scope — see
+/// <see cref="EncryptedPayload.ScopeBoundFormatVersion"/> for the exact AAD layout.
+/// <see cref="DecryptAsync"/> reconstructs the same associated data from the caller-supplied
+/// scope, so a scope mismatch fails the authentication tag check.
+/// </para>
 /// </remarks>
 public sealed partial class PayloadEncryptor(
     IDekManager dekManager,
     IRandomBytesProvider randomBytes,
+    IOptions<VellumOptions> options,
     ILogger<PayloadEncryptor> logger) : IPayloadEncryptor
 {
     private const int NonceSize = 12;
     private const int TagSize = 16;
     private const int DekSizeBytes = 32;
 
+    /// <summary>
+    /// Versioned label prefixed to the scope to form the format-version-2 associated data.
+    /// The label domain-separates the v2 AAD from any future AAD layout, so a v3 format can
+    /// never produce AAD bytes that collide with a v2 envelope's binding.
+    /// </summary>
+    private const string ScopeAadLabel = "vellum:aad:v2:scope:";
+
     private readonly IDekManager _dekManager = dekManager ?? throw new ArgumentNullException(nameof(dekManager));
     private readonly IRandomBytesProvider _randomBytes = randomBytes ?? throw new ArgumentNullException(nameof(randomBytes));
+    private readonly VellumOptions _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
     private readonly ILogger<PayloadEncryptor> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
     /// <inheritdoc />
@@ -77,9 +96,16 @@ public sealed partial class PayloadEncryptor(
             Span<byte> ciphertextSpan = ciphertextWithTag.AsSpan(0, plaintext.Length);
             Span<byte> tagSpan = ciphertextWithTag.AsSpan(plaintext.Length, TagSize);
 
+            // M-B: bind the ciphertext to its scope via AES-GCM associated data (format
+            // version 2) unless the consumer explicitly opted out because the scope is not
+            // available at decrypt time. A null byte[] converts to an empty span, which is
+            // cryptographically identical to "no AAD" — exactly the version-1 layout.
+            bool bindScope = _options.BindScopeToCiphertext;
+            byte[]? associatedData = bindScope ? BuildScopeAad(scope) : null;
+
             using (AesGcm aesGcm = new(dek.Key, TagSize))
             {
-                aesGcm.Encrypt(nonce, plaintext.Span, ciphertextSpan, tagSpan);
+                aesGcm.Encrypt(nonce, plaintext.Span, ciphertextSpan, tagSpan, associatedData);
             }
 
             LogPayloadEncrypted(_logger, scope);
@@ -88,7 +114,9 @@ public sealed partial class PayloadEncryptor(
                 nonce,
                 dek.WrappedKey,
                 dek.KeyId,
-                FormatVersion: EncryptedPayload.CurrentFormatVersion);
+                FormatVersion: bindScope
+                    ? EncryptedPayload.ScopeBoundFormatVersion
+                    : EncryptedPayload.UnboundFormatVersion);
         }
         finally
         {
@@ -99,18 +127,30 @@ public sealed partial class PayloadEncryptor(
     /// <inheritdoc />
     public async Task<byte[]> DecryptAsync(
         EncryptedPayload payload,
+        string scope,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(payload);
 
         // Fail closed on unknown envelope formats BEFORE any crypto work (no DEK unwrap, no
         // KEK round-trip, no AES-GCM call). A future format may change the AAD, add key
-        // commitment, or switch algorithms — interpreting its bytes under the version-1
+        // commitment, or switch algorithms — interpreting its bytes under a known-version
         // layout would be undefined behavior at best and a security bug at worst.
-        if (payload.FormatVersion != EncryptedPayload.CurrentFormatVersion)
+        if (payload.FormatVersion is not (EncryptedPayload.UnboundFormatVersion or EncryptedPayload.ScopeBoundFormatVersion))
         {
             throw new CryptographicException(
-                $"Unsupported envelope format version {payload.FormatVersion}: this version of Vellum only supports format version {EncryptedPayload.CurrentFormatVersion}.");
+                $"Unsupported envelope format version {payload.FormatVersion}: this version of Vellum only supports format versions {EncryptedPayload.UnboundFormatVersion} and {EncryptedPayload.ScopeBoundFormatVersion}.");
+        }
+
+        // M-B: a format version 2 envelope is bound to its scope — refusing a missing scope
+        // here (before any unwrap / KEK round-trip) fails closed instead of burning a KEK
+        // call on a decrypt that is guaranteed to fail the tag check. Version 1 envelopes
+        // carry no binding, so the scope argument is deliberately not validated for them.
+        bool scopeBound = payload.FormatVersion == EncryptedPayload.ScopeBoundFormatVersion;
+        if (scopeBound && string.IsNullOrEmpty(scope))
+        {
+            throw new CryptographicException(
+                "Scope is required for format version 2 envelopes: the ciphertext is bound to its scope via AES-GCM associated data and cannot be decrypted without it.");
         }
 
         if (payload.Nonce.Length != NonceSize)
@@ -149,9 +189,14 @@ public sealed partial class PayloadEncryptor(
 
             byte[] plaintext = new byte[ciphertextLength];
 
+            // M-B: reconstruct the scope AAD for version 2 envelopes. A wrong scope yields
+            // different AAD bytes and AES-GCM rejects the authentication tag — that IS the
+            // cryptographic scope-binding guarantee, no additional equality check needed.
+            byte[]? associatedData = scopeBound ? BuildScopeAad(scope) : null;
+
             using (AesGcm aesGcm = new(dek.Key, TagSize))
             {
-                aesGcm.Decrypt(payload.Nonce, ciphertext, tag, plaintext);
+                aesGcm.Decrypt(payload.Nonce, ciphertext, tag, plaintext, associatedData);
             }
 
             LogPayloadDecrypted(_logger, payload.KeyId);
@@ -162,6 +207,15 @@ public sealed partial class PayloadEncryptor(
             CryptographicOperations.ZeroMemory(dek.Key);
         }
     }
+
+    /// <summary>
+    /// Builds the AES-GCM associated data for a format version 2 envelope:
+    /// <c>UTF8("vellum:aad:v2:scope:" + scope)</c>. This is the single place the v2 AAD
+    /// layout is defined — encrypt and decrypt both call it, so the two sides can never
+    /// drift apart.
+    /// </summary>
+    private static byte[] BuildScopeAad(string scope) =>
+        Encoding.UTF8.GetBytes(ScopeAadLabel + scope);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Payload encrypted for scope {Scope}")]
     private static partial void LogPayloadEncrypted(ILogger logger, string scope);

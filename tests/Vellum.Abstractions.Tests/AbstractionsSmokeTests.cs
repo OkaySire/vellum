@@ -60,15 +60,20 @@ public sealed class AbstractionsSmokeTests
     }
 
     [Fact]
-    public void EncryptedPayload_FormatVersion_DefaultsToCurrentFormatVersion()
+    public void EncryptedPayload_FormatVersion_DefaultsToUnboundFormatVersion()
     {
         // Backward compatibility: envelopes persisted by pre-versioning consumers carry no
         // stored version. Reconstructing with the original four positional arguments must
-        // yield the version-1 format they were produced under.
+        // yield the version-1 (no-AAD) format they were produced under — NOT the current
+        // version, which binds the ciphertext to its scope via AES-GCM associated data.
         EncryptedPayload legacy = new([1, 2, 3], new byte[12], new WrappedKey("vault:v1:abc", "1"), Guid.NewGuid());
 
-        legacy.FormatVersion.Should().Be(EncryptedPayload.CurrentFormatVersion);
-        EncryptedPayload.CurrentFormatVersion.Should().Be(1, "version 1 is the only format defined so far");
+        legacy.FormatVersion.Should().Be(EncryptedPayload.UnboundFormatVersion);
+        EncryptedPayload.UnboundFormatVersion.Should().Be(1, "version 1 is the legacy no-AAD format");
+        EncryptedPayload.ScopeBoundFormatVersion.Should().Be(2, "version 2 binds the scope as AAD");
+        EncryptedPayload.CurrentFormatVersion.Should().Be(
+            EncryptedPayload.ScopeBoundFormatVersion,
+            "scope binding is the current default envelope format");
     }
 
     [Fact]

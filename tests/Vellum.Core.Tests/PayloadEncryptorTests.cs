@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using FluentAssertions;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Vellum.Tests.Fakes;
@@ -14,13 +13,16 @@ public sealed class PayloadEncryptorTests
     private const string Scope = "tenant:42";
 
     private static (PayloadEncryptor Encryptor, FakeKeyEncryptionProvider Provider, DekManager DekManager)
-        BuildSut(TimeSpan? dekCacheTtl = null)
+        BuildSut(TimeSpan? dekCacheTtl = null, bool bindScopeToCiphertext = true)
     {
         FakeKeyEncryptionProvider provider = new();
         FakeEncryptionKeyStore store = new();
         CountingRandomBytesProvider random = new();
-        MemoryCache cache = new(new MemoryCacheOptions());
-        VellumOptions options = new();
+        VellumDekCache cache = new();
+        VellumOptions options = new()
+        {
+            BindScopeToCiphertext = bindScopeToCiphertext,
+        };
         if (dekCacheTtl is not null)
         {
             options.DekCacheTtl = dekCacheTtl.Value;
@@ -38,6 +40,7 @@ public sealed class PayloadEncryptorTests
         PayloadEncryptor encryptor = new(
             dekManager,
             random,
+            Options.Create(options),
             NullLogger<PayloadEncryptor>.Instance);
 
         return (encryptor, provider, dekManager);
@@ -57,7 +60,7 @@ public sealed class PayloadEncryptorTests
 
         byte[] plaintext = Encoding.UTF8.GetBytes("hello vellum — \u0041\u00e9");
         EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
-        byte[] decrypted = await encryptor.DecryptAsync(envelope);
+        byte[] decrypted = await encryptor.DecryptAsync(envelope, Scope);
 
         decrypted.Should().Equal(plaintext);
         envelope.Nonce.Should().HaveCount(12);
@@ -71,7 +74,7 @@ public sealed class PayloadEncryptorTests
 
         byte[] plaintext = Array.Empty<byte>();
         EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
-        byte[] decrypted = await encryptor.DecryptAsync(envelope);
+        byte[] decrypted = await encryptor.DecryptAsync(envelope, Scope);
 
         decrypted.Should().BeEmpty();
         envelope.Ciphertext.Length.Should().Be(16, "empty plaintext still carries a 16-byte auth tag");
@@ -100,7 +103,7 @@ public sealed class PayloadEncryptorTests
 
         envelope.Ciphertext[0] ^= 0xFF;
 
-        Func<Task> act = async () => await encryptor.DecryptAsync(envelope);
+        Func<Task> act = async () => await encryptor.DecryptAsync(envelope, Scope);
         await act.Should().ThrowAsync<CryptographicException>();
     }
 
@@ -114,7 +117,7 @@ public sealed class PayloadEncryptorTests
 
         envelope.Nonce[0] ^= 0xFF;
 
-        Func<Task> act = async () => await encryptor.DecryptAsync(envelope);
+        Func<Task> act = async () => await encryptor.DecryptAsync(envelope, Scope);
         await act.Should().ThrowAsync<CryptographicException>();
     }
 
@@ -125,9 +128,9 @@ public sealed class PayloadEncryptorTests
 
         byte[] plaintext = Encoding.UTF8.GetBytes("short nonce");
         EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
-        EncryptedPayload malformed = new(envelope.Ciphertext, new byte[8], envelope.WrappedDek, envelope.KeyId);
+        EncryptedPayload malformed = envelope with { Nonce = new byte[8] };
 
-        Func<Task> act = async () => await encryptor.DecryptAsync(malformed);
+        Func<Task> act = async () => await encryptor.DecryptAsync(malformed, Scope);
         await act.Should().ThrowAsync<CryptographicException>();
     }
 
@@ -138,9 +141,9 @@ public sealed class PayloadEncryptorTests
 
         byte[] plaintext = Encoding.UTF8.GetBytes("tag check");
         EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
-        EncryptedPayload malformed = new(new byte[8], envelope.Nonce, envelope.WrappedDek, envelope.KeyId);
+        EncryptedPayload malformed = envelope with { Ciphertext = new byte[8] };
 
-        Func<Task> act = async () => await encryptor.DecryptAsync(malformed);
+        Func<Task> act = async () => await encryptor.DecryptAsync(malformed, Scope);
         await act.Should().ThrowAsync<CryptographicException>();
     }
 
@@ -155,7 +158,7 @@ public sealed class PayloadEncryptorTests
         byte[] plaintext = Encoding.UTF8.GetBytes("self contained");
         EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
 
-        byte[] decrypted = await encryptor.DecryptAsync(envelope);
+        byte[] decrypted = await encryptor.DecryptAsync(envelope, Scope);
         decrypted.Should().Equal(plaintext);
     }
 
@@ -171,8 +174,8 @@ public sealed class PayloadEncryptorTests
         EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
 
         int unwrapsBefore = provider.UnwrapCalls;
-        _ = await encryptor.DecryptAsync(envelope);
-        _ = await encryptor.DecryptAsync(envelope);
+        _ = await encryptor.DecryptAsync(envelope, Scope);
+        _ = await encryptor.DecryptAsync(envelope, Scope);
 
         provider.UnwrapCalls.Should().Be(unwrapsBefore + 1,
             "the second decrypt must hit the wrapped-key cache and avoid a second KEK round-trip");
@@ -191,7 +194,7 @@ public sealed class PayloadEncryptorTests
         EncryptedPayload envelopeA = await encryptor.EncryptAsync(
             Encoding.UTF8.GetBytes("payload-a"),
             scope: "tenant:a");
-        _ = await encryptor.DecryptAsync(envelopeA);
+        _ = await encryptor.DecryptAsync(envelopeA, scope: "tenant:a");
 
         // Rotate the DEK for scope A so the next EncryptAsync produces a DIFFERENT
         // WrappedKey (different ciphertext handle in the fake provider). This guarantees
@@ -206,13 +209,13 @@ public sealed class PayloadEncryptorTests
             "rotation must produce a fresh DEK and therefore a fresh wrapped ciphertext");
 
         int unwrapsBefore = provider.UnwrapCalls;
-        _ = await encryptor.DecryptAsync(envelopeB);
+        _ = await encryptor.DecryptAsync(envelopeB, scope: "tenant:a");
         provider.UnwrapCalls.Should().Be(unwrapsBefore + 1,
             "a different wrapped key must miss the cache and trigger its own Unwrap");
 
         // And decrypting envelopeA a second time should still be a cache hit.
         int unwrapsAfter = provider.UnwrapCalls;
-        _ = await encryptor.DecryptAsync(envelopeA);
+        _ = await encryptor.DecryptAsync(envelopeA, scope: "tenant:a");
         provider.UnwrapCalls.Should().Be(unwrapsAfter,
             "envelopeA's wrapped key must still be cache-hot after envelopeB's decrypt");
     }
@@ -223,7 +226,7 @@ public sealed class PayloadEncryptorTests
         (PayloadEncryptor encryptor, _, _) = BuildSut();
 
         EncryptedPayload envelope = await encryptor.EncryptStringAsync("Hé, Vellum!", Scope);
-        string decrypted = await encryptor.DecryptStringAsync(envelope);
+        string decrypted = await encryptor.DecryptStringAsync(envelope, Scope);
 
         decrypted.Should().Be("Hé, Vellum!");
     }
@@ -239,7 +242,7 @@ public sealed class PayloadEncryptorTests
         FakeKeyEncryptionProvider realProvider = new();
         FakeEncryptionKeyStore store = new();
         CountingRandomBytesProvider random = new();
-        MemoryCache cache = new(new MemoryCacheOptions());
+        VellumDekCache cache = new();
         VellumOptions options = new();
 
         DekManager dekManager = new(
@@ -254,6 +257,7 @@ public sealed class PayloadEncryptorTests
         PayloadEncryptor encryptor = new(
             dekManager,
             random,
+            Options.Create(options),
             NullLogger<PayloadEncryptor>.Instance);
 
         byte[] plaintext = Encoding.UTF8.GetBytes("downgrade check");
@@ -263,7 +267,7 @@ public sealed class PayloadEncryptorTests
         // The DekManager under test is fresh (no cache primed for envelope.WrappedDek), so
         // the first DecryptAsync goes through the slow path and hits EnsureDekLength.
         ShortDekKeyEncryptionProvider shortProvider = new(dekBytesLength: 16);
-        MemoryCache freshCache = new(new MemoryCacheOptions());
+        VellumDekCache freshCache = new();
         DekManager decryptDekManager = new(
             shortProvider,
             store,
@@ -275,9 +279,10 @@ public sealed class PayloadEncryptorTests
         PayloadEncryptor decryptOnly = new(
             decryptDekManager,
             random,
+            Options.Create(options),
             NullLogger<PayloadEncryptor>.Instance);
 
-        Func<Task> act = async () => await decryptOnly.DecryptAsync(envelope);
+        Func<Task> act = async () => await decryptOnly.DecryptAsync(envelope, Scope);
         await act.Should().ThrowAsync<CryptographicException>()
             .WithMessage("*expected 32 bytes*");
     }
@@ -295,18 +300,19 @@ public sealed class PayloadEncryptorTests
             Scope);
 
         envelope.FormatVersion.Should().Be(EncryptedPayload.CurrentFormatVersion);
-        envelope.FormatVersion.Should().Be(1, "version 1 is the only format ever produced so far");
+        envelope.FormatVersion.Should().Be(EncryptedPayload.ScopeBoundFormatVersion,
+            "scope binding is on by default, so fresh envelopes are format version 2");
     }
 
     [Theory]
     [InlineData(0)]
-    [InlineData(2)]
+    [InlineData(3)]
     [InlineData(99)]
     public async Task Decrypt_UnsupportedFormatVersion_FailsClosedBeforeAnyCryptoWork(int unsupportedVersion)
     {
         // C-2: an unknown format version must be rejected BEFORE any crypto work — no DEK
         // unwrap, no KEK round-trip, no AES-GCM call. Interpreting a future format's bytes
-        // under the version-1 layout would be undefined behavior.
+        // under a known-version layout would be undefined behavior.
         (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut();
 
         byte[] plaintext = Encoding.UTF8.GetBytes("unknown version");
@@ -314,16 +320,16 @@ public sealed class PayloadEncryptorTests
         EncryptedPayload futuristic = envelope with { FormatVersion = unsupportedVersion };
 
         int unwrapsBefore = provider.UnwrapCalls;
-        Func<Task> act = async () => await encryptor.DecryptAsync(futuristic);
+        Func<Task> act = async () => await encryptor.DecryptAsync(futuristic, Scope);
 
         await act.Should().ThrowAsync<CryptographicException>()
             .WithMessage($"*format version {unsupportedVersion}*");
         provider.UnwrapCalls.Should().Be(unwrapsBefore,
             "version validation must fire before any DEK unwrap / KEK round-trip");
 
-        // The rejection must not have touched the envelope: the original (version-1) copy
-        // sharing the same ciphertext/nonce arrays still decrypts.
-        byte[] decrypted = await encryptor.DecryptAsync(envelope);
+        // The rejection must not have touched the envelope: the original copy sharing the
+        // same ciphertext/nonce arrays still decrypts.
+        byte[] decrypted = await encryptor.DecryptAsync(envelope, Scope);
         decrypted.Should().Equal(plaintext);
     }
 
@@ -332,17 +338,19 @@ public sealed class PayloadEncryptorTests
     {
         // Backward compatibility: consumers that persisted envelopes field-by-field before
         // FormatVersion existed reconstruct them with the original four positional
-        // arguments. The constructor defaults FormatVersion to CurrentFormatVersion (1),
-        // which is exactly the format those envelopes were produced under.
-        (PayloadEncryptor encryptor, _, _) = BuildSut();
+        // arguments. The constructor defaults FormatVersion to UnboundFormatVersion (1),
+        // which is exactly the format those envelopes were produced under (0.1.x had no
+        // AAD). Encrypt with binding disabled to simulate a 0.1.x-era envelope.
+        (PayloadEncryptor legacyProducer, _, _) = BuildSut(bindScopeToCiphertext: false);
 
         byte[] plaintext = Encoding.UTF8.GetBytes("legacy envelope");
-        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
+        EncryptedPayload envelope = await legacyProducer.EncryptAsync(plaintext, Scope);
+        envelope.FormatVersion.Should().Be(EncryptedPayload.UnboundFormatVersion);
 
         EncryptedPayload legacy = new(envelope.Ciphertext, envelope.Nonce, envelope.WrappedDek, envelope.KeyId);
 
-        legacy.FormatVersion.Should().Be(EncryptedPayload.CurrentFormatVersion);
-        byte[] decrypted = await encryptor.DecryptAsync(legacy);
+        legacy.FormatVersion.Should().Be(EncryptedPayload.UnboundFormatVersion);
+        byte[] decrypted = await legacyProducer.DecryptAsync(legacy, Scope);
         decrypted.Should().Equal(plaintext);
     }
 
@@ -358,6 +366,7 @@ public sealed class PayloadEncryptorTests
         PayloadEncryptor encryptor = new(
             dekManager,
             new CountingRandomBytesProvider(),
+            Options.Create(new VellumOptions()),
             NullLogger<PayloadEncryptor>.Instance);
 
         Func<Task> act = async () => await encryptor.EncryptAsync(
@@ -377,6 +386,7 @@ public sealed class PayloadEncryptorTests
         PayloadEncryptor encryptor = new(
             dekManager,
             new CountingRandomBytesProvider(),
+            Options.Create(new VellumOptions()),
             NullLogger<PayloadEncryptor>.Instance);
 
         byte[] plaintext = Encoding.UTF8.GetBytes("aes-256 ok");
@@ -426,6 +436,122 @@ public sealed class PayloadEncryptorTests
 
         uniqueCiphertexts.Count.Should().Be(iterations,
             "distinct nonces over the same plaintext must yield distinct ciphertexts");
+    }
+
+    // -----------------------------------------------------------------------------------
+    // M-B: scope binding via AES-GCM associated data (format version 2).
+    // -----------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task EncryptDecrypt_V2RoundTrip_SameScope_Succeeds()
+    {
+        // F3-1: the happy path of scope binding. Encrypt under scope S, decrypt under the
+        // same scope S — and the envelope self-describes as format version 2.
+        (PayloadEncryptor encryptor, _, _) = BuildSut();
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("scope-bound payload");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
+
+        envelope.FormatVersion.Should().Be(EncryptedPayload.ScopeBoundFormatVersion);
+
+        byte[] decrypted = await encryptor.DecryptAsync(envelope, Scope);
+        decrypted.Should().Equal(plaintext);
+    }
+
+    [Fact]
+    public async Task Decrypt_V2EnvelopeMovedToAnotherScope_ThrowsGcmAuthFailure()
+    {
+        // F3-2 (the M-B attack): an envelope encrypted for tenant A, copied verbatim into
+        // tenant B's records, must NOT decrypt when presented under tenant B's scope. The
+        // AAD mismatch fails the AES-GCM authentication tag check — that is the
+        // cryptographic guarantee, with no extra equality check in Vellum code.
+        (PayloadEncryptor encryptor, _, _) = BuildSut();
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("tenant A's secret");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, scope: "tenant:a");
+
+        Func<Task> act = async () => await encryptor.DecryptAsync(envelope, scope: "tenant:b");
+        await act.Should().ThrowAsync<CryptographicException>();
+
+        // Sanity: the same envelope still decrypts under its own scope.
+        byte[] decrypted = await encryptor.DecryptAsync(envelope, scope: "tenant:a");
+        decrypted.Should().Equal(plaintext);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task Decrypt_V2EnvelopeWithMissingScope_FailsClosedBeforeAnyUnwrap(string? missingScope)
+    {
+        // F3-3: a version 2 envelope without a scope can never pass the tag check, so the
+        // rejection must fire BEFORE any DEK unwrap / KEK round-trip (fail closed, no
+        // wasted KEK call). Use a cold cache (TTL <= 0 disables caching) so a successful
+        // unwrap would be observable on the fake provider.
+        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut(
+            dekCacheTtl: TimeSpan.Zero);
+
+        EncryptedPayload envelope = await encryptor.EncryptAsync(
+            Encoding.UTF8.GetBytes("needs a scope"),
+            Scope);
+
+        int unwrapsBefore = provider.UnwrapCalls;
+        Func<Task> act = async () => await encryptor.DecryptAsync(envelope, missingScope!);
+
+        await act.Should().ThrowAsync<CryptographicException>()
+            .WithMessage("*Scope is required for format version 2*");
+        provider.UnwrapCalls.Should().Be(unwrapsBefore,
+            "the scope-required check must fire before any DEK unwrap / KEK round-trip");
+    }
+
+    [Fact]
+    public async Task Decrypt_V1Envelope_DecryptsRegardlessOfScopeArgument()
+    {
+        // F3-4: legacy version 1 envelopes carry NO scope binding — they decrypt under any
+        // scope argument, including empty. This is the documented legacy-compat trade-off.
+        (PayloadEncryptor encryptor, _, _) = BuildSut(bindScopeToCiphertext: false);
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("unbound legacy payload");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, scope: "tenant:a");
+
+        envelope.FormatVersion.Should().Be(EncryptedPayload.UnboundFormatVersion);
+
+        (await encryptor.DecryptAsync(envelope, scope: "tenant:a")).Should().Equal(plaintext);
+        (await encryptor.DecryptAsync(envelope, scope: "tenant:b")).Should().Equal(plaintext);
+        (await encryptor.DecryptAsync(envelope, scope: string.Empty)).Should().Equal(plaintext);
+    }
+
+    [Fact]
+    public async Task Encrypt_BindScopeToCiphertextDisabled_ProducesV1EnvelopeWithoutAad()
+    {
+        // F3-5: the opt-out. BindScopeToCiphertext=false produces version 1 envelopes (no
+        // AAD) for consumers who cannot supply the scope at decrypt time — and a default
+        // (binding-enabled) decryptor still honors the envelope's own version and decrypts
+        // it without requiring the original scope.
+        (PayloadEncryptor unboundProducer, _, _) = BuildSut(bindScopeToCiphertext: false);
+
+        byte[] plaintext = Encoding.UTF8.GetBytes("opt-out payload");
+        EncryptedPayload envelope = await unboundProducer.EncryptAsync(plaintext, Scope);
+
+        envelope.FormatVersion.Should().Be(EncryptedPayload.UnboundFormatVersion,
+            "the opt-out must be visible in the envelope's self-described format version");
+
+        byte[] decrypted = await unboundProducer.DecryptAsync(envelope, scope: "some:other:scope");
+        decrypted.Should().Equal(plaintext);
+    }
+
+    [Fact]
+    public async Task Decrypt_V2EnvelopeWithTamperedScope_Throws()
+    {
+        // F3-6: tampered-scope simulation — even a single trailing character appended to
+        // the correct scope produces different AAD bytes and must fail the tag check.
+        (PayloadEncryptor encryptor, _, _) = BuildSut();
+
+        EncryptedPayload envelope = await encryptor.EncryptAsync(
+            Encoding.UTF8.GetBytes("exact scope required"),
+            Scope);
+
+        Func<Task> act = async () => await encryptor.DecryptAsync(envelope, Scope + "x");
+        await act.Should().ThrowAsync<CryptographicException>();
     }
 
     /// <summary>
