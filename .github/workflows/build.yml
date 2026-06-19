@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Install all three runtimes so xUnit can execute tests on each TFM
       # (net8.0/net9.0/net10.0). global.json pins the SDK used for build.
