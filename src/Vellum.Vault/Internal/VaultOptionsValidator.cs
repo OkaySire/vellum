@@ -29,11 +29,79 @@ internal sealed class VaultOptionsValidator : IValidateOptions<VaultOptions>
             string safeEcho = ScrubUserInfo(options.Address);
             failures.Add($"{nameof(VaultOptions.Address)} ('{safeEcho}') must be an absolute http:// or https:// URI.");
         }
-
-        if (string.IsNullOrWhiteSpace(options.Token))
+        else if (parsed.Scheme == Uri.UriSchemeHttp && !options.AllowInsecureHttp)
         {
-            // Never include the token value itself in the failure message.
-            failures.Add($"{nameof(VaultOptions.Token)} must be a non-empty Vault auth token.");
+            // H-A: plain http:// transmits the X-Vault-Token header and the base64-encoded
+            // plaintext DEKs (encrypt request body / decrypt response body) in cleartext.
+            // Fail closed unless the consumer explicitly opts in for local development.
+            string safeEcho = ScrubUserInfo(options.Address);
+            failures.Add(
+                $"{nameof(VaultOptions.Address)} ('{safeEcho}') uses plain http://, which would transmit " +
+                $"the Vault token and plaintext DEKs in cleartext. Use https://, or set " +
+                $"{nameof(VaultOptions.AllowInsecureHttp)} = true for local development only " +
+                "(e.g. against 'vault server -dev').");
+        }
+
+        // Auth matrix: each method requires exactly its own credentials and forbids the other
+        // method's fields, so a half-migrated configuration fails fast instead of silently
+        // using the wrong credential. Credential VALUES are never echoed in failure messages.
+        switch (options.AuthMethod)
+        {
+            case VaultAuthMethod.Token:
+                if (string.IsNullOrWhiteSpace(options.Token))
+                {
+                    // Never include the token value itself in the failure message.
+                    failures.Add($"{nameof(VaultOptions.Token)} must be a non-empty Vault auth token when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.Token)}.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(options.RoleId) || !string.IsNullOrWhiteSpace(options.SecretId))
+                {
+                    failures.Add($"{nameof(VaultOptions.RoleId)} and {nameof(VaultOptions.SecretId)} must be empty when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.Token)}; set " +
+                                 $"{nameof(VaultOptions.AuthMethod)} = {nameof(VaultAuthMethod.AppRole)} to use AppRole credentials.");
+                }
+
+                break;
+
+            case VaultAuthMethod.AppRole:
+                if (string.IsNullOrWhiteSpace(options.RoleId))
+                {
+                    failures.Add($"{nameof(VaultOptions.RoleId)} must be non-empty when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.AppRole)}.");
+                }
+
+                if (string.IsNullOrWhiteSpace(options.SecretId))
+                {
+                    failures.Add($"{nameof(VaultOptions.SecretId)} must be non-empty when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.AppRole)}.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(options.Token))
+                {
+                    failures.Add($"{nameof(VaultOptions.Token)} must be empty when " +
+                                 $"{nameof(VaultOptions.AuthMethod)} is {nameof(VaultAuthMethod.AppRole)}; the token is " +
+                                 "acquired via AppRole login.");
+                }
+
+                if (string.IsNullOrWhiteSpace(options.AppRoleMount))
+                {
+                    failures.Add($"{nameof(VaultOptions.AppRoleMount)} must be a non-empty AppRole mount path " +
+                                 "(e.g. 'approle').");
+                }
+
+                break;
+
+            default:
+                failures.Add($"{nameof(VaultOptions.AuthMethod)} value '{options.AuthMethod}' is not a recognised " +
+                             $"{nameof(VaultAuthMethod)}.");
+                break;
+        }
+
+        if (options.TokenRenewalThreshold <= 0 || options.TokenRenewalThreshold > 1)
+        {
+            failures.Add($"{nameof(VaultOptions.TokenRenewalThreshold)} must be in (0, 1]; got " +
+                         $"{options.TokenRenewalThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture)}.");
         }
 
         if (string.IsNullOrWhiteSpace(options.KeyName))

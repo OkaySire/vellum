@@ -19,6 +19,7 @@
     <ProjectReference Include="..\..\src\Vellum.Core\Vellum.Core.csproj" />
     <ProjectReference Include="..\..\src\Vellum.Vault\Vellum.Vault.csproj" />
     <ProjectReference Include="..\..\src\Vellum.EntityFrameworkCore\Vellum.EntityFrameworkCore.csproj" />
+    <ProjectReference Include="..\..\src\Vellum.Rotation\Vellum.Rotation.csproj" />
   </ItemGroup>
 
   <ItemGroup>

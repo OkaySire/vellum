@@ -35,9 +35,11 @@ is on the decrypt path, in `Vellum.Core`, by default, for everyone.
 Technically yes — you can still write an `IPayloadEncryptor` decorator that wraps
 `DecryptAsync` and maintains its own cache (e.g. if you need a distributed cache
 backed by Redis, or per-tenant TTLs, or telemetry hooks). But before doing that,
-measure: the built-in cache uses the shared `IMemoryCache` instance from
-`services.AddMemoryCache()` and respects `VellumOptions.DekCacheTtl`, which is
-enough for the vast majority of workloads. Prefer configuration over decoration.
+measure: the built-in cache is a Vellum-private `VellumDekCache` (since 0.2.0 —
+never the application's shared `IMemoryCache`, with key bytes zeroed on eviction)
+and respects `VellumOptions.DekCacheTtl`, which is enough for the vast majority of
+workloads. Prefer configuration over decoration — and think twice before copying
+plaintext DEKs into a cache that other code can reach.
 
 ## Related
 

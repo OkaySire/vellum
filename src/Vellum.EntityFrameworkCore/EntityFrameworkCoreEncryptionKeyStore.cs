@@ -139,6 +139,75 @@ public sealed partial class EntityFrameworkCoreEncryptionKeyStore<TContext>(
     }
 
     /// <inheritdoc />
+    public async Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(newKey);
+
+        if (!newKey.IsActive)
+        {
+            throw new ArgumentException(
+                $"RotateAsync requires an active key (IsActive = true); installing an inactive key would leave scope '{newKey.Scope}' with zero active keys.",
+                nameof(newKey));
+        }
+
+        // Atomic swap: load the currently-active records (tracked, with IgnoreQueryFilters — L1),
+        // flip them to inactive, add the new record, and commit everything in ONE SaveChangesAsync.
+        // EF Core wraps a single SaveChanges in a single transaction, and the filtered unique
+        // index on (Scope) WHERE IsActive is checked at the right time inside that transaction on
+        // both SQLite and PostgreSQL — so either the whole rotation commits or nothing changes
+        // and the old key stays active. No zero-active-key window, ever.
+        List<EncryptionKeyRecord> active = await Records
+            .IgnoreQueryFilters()
+            .Where(k => k.Scope == newKey.Scope && k.IsActive)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        foreach (EncryptionKeyRecord record in active)
+        {
+            record.IsActive = false;
+        }
+
+        EncryptionKeyRecord candidate = EncryptionKeyRecord.FromDomain(newKey);
+        Records.Add(candidate);
+
+        try
+        {
+            await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            LogKeyRotated(_logger, newKey.KeyId, newKey.Scope, active.Count);
+            return newKey;
+        }
+        catch (DbUpdateException ex)
+        {
+            // The transaction rolled back — nothing changed in the database. Detach every entity
+            // we touched (the failed candidate AND the in-memory-deactivated records) so the
+            // context stays usable for the caller and the tracker does not retry the flips on a
+            // later SaveChanges.
+            _context.Entry(candidate).State = EntityState.Detached;
+            foreach (EncryptionKeyRecord record in active)
+            {
+                _context.Entry(record).State = EntityState.Detached;
+            }
+
+            // Re-read the active key (IgnoreQueryFilters via GetActiveAsync — L1). Two outcomes:
+            //  - A concurrent rotation won: the active key is a FRESH key, not one of the keys we
+            //    tried to deactivate. Return that winner, mirroring CreateAsync's race contract.
+            //  - Anything else (transient DB failure, constraint on another column, ...): the old
+            //    key is still active or no key is active. Rotation did NOT happen — surface the
+            //    failure fail-closed instead of masking it behind the still-active old key.
+            EncryptionKey? current = await GetActiveAsync(newKey.Scope, cancellationToken).ConfigureAwait(false);
+            if (current is not null && !active.Exists(record => record.KeyId == current.KeyId))
+            {
+                LogRotateRaceDetected(_logger, newKey.KeyId, current.KeyId, newKey.Scope);
+                return current;
+            }
+
+            throw new InvalidOperationException(
+                $"Failed to rotate encryption key for scope '{newKey.Scope}'; the previously-active key is unchanged.",
+                ex);
+        }
+    }
+
+    /// <inheritdoc />
     public async Task DeactivateAllAsync(string scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -160,6 +229,45 @@ public sealed partial class EntityFrameworkCoreEncryptionKeyStore<TContext>(
         }
 
         await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<EncryptionKey> UpdateWrappedKeyAsync(
+        Guid keyId,
+        string scope,
+        WrappedKey newWrappedKey,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(newWrappedKey);
+
+        // Tracked load (no AsNoTracking) so the mutation below is persisted by SaveChangesAsync.
+        // IgnoreQueryFilters per L1 — DEK rows must never be hidden by the consumer's tenant
+        // filter. Filtering by BOTH KeyId and Scope is the M1 defense: a caller cannot overwrite
+        // another tenant's wrapped DEK by guessing a Guid.
+        EncryptionKeyRecord? record = await Records
+            .IgnoreQueryFilters()
+            .Where(k => k.KeyId == keyId && k.Scope == scope)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (record is null)
+        {
+            // Fail closed: a silent no-op would let a rewrap sweep report success while data
+            // still depends on the old KEK version.
+            LogUpdateWrappedKeyMiss(_logger, keyId, scope);
+            throw new InvalidOperationException(
+                $"Encryption key {keyId} not found for scope '{scope}'; the wrapped key material was not updated.");
+        }
+
+        // Only the wrapped material changes — KeyId, Scope, CreatedAt, ExpiresAt, IsActive are
+        // immutable under a rewrap.
+        record.WrappedCiphertext = newWrappedKey.Ciphertext;
+        record.WrappedProviderVersion = newWrappedKey.ProviderVersion;
+
+        await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        LogWrappedKeyUpdated(_logger, keyId, scope, newWrappedKey.ProviderVersion);
+        return record.ToDomain();
     }
 
     /// <inheritdoc />
@@ -213,6 +321,18 @@ public sealed partial class EntityFrameworkCoreEncryptionKeyStore<TContext>(
     private static partial void LogCreateRaceDetected(ILogger logger, Guid candidateKeyId, Guid winnerKeyId, string scope);
 
     [LoggerMessage(
+        EventId = 5,
+        Level = LogLevel.Information,
+        Message = "Vellum EF Core store: rotated scope {Scope} — installed new active key {KeyId}, deactivated {DeactivatedCount} previous key(s) in one transaction.")]
+    private static partial void LogKeyRotated(ILogger logger, Guid keyId, string scope, int deactivatedCount);
+
+    [LoggerMessage(
+        EventId = 6,
+        Level = LogLevel.Information,
+        Message = "Vellum EF Core store: rotation race detected — candidate {CandidateKeyId} lost to concurrent winner {WinnerKeyId} for scope {Scope}.")]
+    private static partial void LogRotateRaceDetected(ILogger logger, Guid candidateKeyId, Guid winnerKeyId, string scope);
+
+    [LoggerMessage(
         EventId = 3,
         Level = LogLevel.Debug,
         Message = "Vellum EF Core store: loaded {Count} historical key(s) for scope {Scope}.")]
@@ -223,4 +343,16 @@ public sealed partial class EntityFrameworkCoreEncryptionKeyStore<TContext>(
         Level = LogLevel.Debug,
         Message = "Vellum EF Core store: GetByIdAsync miss for key {KeyId} under scope {Scope}.")]
     private static partial void LogGetByIdMiss(ILogger logger, Guid keyId, string scope);
+
+    [LoggerMessage(
+        EventId = 7,
+        Level = LogLevel.Information,
+        Message = "Vellum EF Core store: updated wrapped key material for key {KeyId} in scope {Scope} (new provider version {ProviderVersion}).")]
+    private static partial void LogWrappedKeyUpdated(ILogger logger, Guid keyId, string scope, string providerVersion);
+
+    [LoggerMessage(
+        EventId = 8,
+        Level = LogLevel.Warning,
+        Message = "Vellum EF Core store: UpdateWrappedKeyAsync miss for key {KeyId} under scope {Scope} — failing closed.")]
+    private static partial void LogUpdateWrappedKeyMiss(ILogger logger, Guid keyId, string scope);
 }

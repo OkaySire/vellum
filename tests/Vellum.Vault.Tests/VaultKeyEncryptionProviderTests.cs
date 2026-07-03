@@ -345,6 +345,123 @@ public sealed class VaultKeyEncryptionProviderTests
     }
 
     // ---------------------------------------------------------------------
+    // Rewrap (H1) — POST /v1/transit/rewrap/{key}
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public async Task RewrapAsync_ValidCiphertext_CallsRewrapEndpointAndReturnsNewVersion()
+    {
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(JsonOk(new { data = new { ciphertext = "vault:v3:NewCipher==" } })));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        WrappedKey rewrapped = await provider.RewrapAsync(new WrappedKey("vault:v1:OldCipher==", "v1"));
+
+        rewrapped.Ciphertext.Should().Be("vault:v3:NewCipher==");
+        rewrapped.ProviderVersion.Should().Be("v3");
+
+        handler.CapturedRequests.Should().HaveCount(1);
+        HttpRequestMessage request = handler.CapturedRequests[0];
+        request.Method.Should().Be(HttpMethod.Post);
+        request.RequestUri!.AbsoluteUri.Should().Be("http://vault.test:8200/v1/transit/rewrap/test-key");
+
+        using JsonDocument body = JsonDocument.Parse(handler.CapturedRequestBodies[0]);
+        body.RootElement.GetProperty("ciphertext").GetString().Should().Be("vault:v1:OldCipher==");
+
+        // The plaintext must never appear in the request — the rewrap happens inside Vault.
+        body.RootElement.TryGetProperty("plaintext", out JsonElement _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task RewrapAsync_NullWrappedKey_ThrowsArgumentNullException()
+    {
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(JsonOk(new { data = new { ciphertext = "vault:v2:x==" } })));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        Func<Task> act = async () => await provider.RewrapAsync(null!);
+
+        await act.Should().ThrowAsync<ArgumentNullException>();
+        handler.CapturedRequests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RewrapAsync_WrongFormat_ThrowsBeforeAnyHttpCall()
+    {
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(JsonOk(new { data = new { ciphertext = "vault:v2:x==" } })));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        Func<Task> act = async () => await provider.RewrapAsync(new WrappedKey("not-a-vault-ciphertext", "v1"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .Where(ex => ex.Message.Contains("vault:v", StringComparison.Ordinal));
+        handler.CapturedRequests.Should().BeEmpty("because the format should be rejected before any HTTP call");
+    }
+
+    [Fact]
+    public async Task RewrapAsync_Non200_ThrowsInvalidOperationException()
+    {
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(Error(HttpStatusCode.Forbidden, "{\"errors\":[\"permission denied\"]}")));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        Func<Task> act = async () => await provider.RewrapAsync(new WrappedKey("vault:v1:x==", "v1"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .Where(ex => ex.Message.Contains("rewrap", StringComparison.Ordinal)
+                         && ex.Message.Contains("403", StringComparison.Ordinal)
+                         && ex.Message.Contains("permission denied", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RewrapAsync_MalformedJson_ThrowsJsonException()
+    {
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(Ok("this-is-not-json")));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        Func<Task> act = async () => await provider.RewrapAsync(new WrappedKey("vault:v1:x==", "v1"));
+
+        await act.Should().ThrowAsync<JsonException>();
+    }
+
+    [Fact]
+    public async Task RewrapAsync_NullCiphertextInResponse_ThrowsInvalidOperationException()
+    {
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(Ok(_nullCiphertextJson)));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        Func<Task> act = async () => await provider.RewrapAsync(new WrappedKey("vault:v1:x==", "v1"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .Where(ex => ex.Message.Contains("ciphertext", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData("notvault:v3:abc")]
+    [InlineData("vault:v:abc")]
+    [InlineData("vault:v0:payload")]
+    public async Task RewrapAsync_MalformedResponseCiphertext_ThrowsInvalidOperationException(string ciphertext)
+    {
+        FakeHttpMessageHandler handler = new((request, ct) =>
+            Task.FromResult(JsonOk(new { data = new { ciphertext } })));
+
+        VaultKeyEncryptionProvider provider = CreateProvider(handler);
+
+        Func<Task> act = async () => await provider.RewrapAsync(new WrappedKey("vault:v1:x==", "v1"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    // ---------------------------------------------------------------------
     // Roundtrip — end-to-end via a fake Vault that preserves the plaintext
     // ---------------------------------------------------------------------
 

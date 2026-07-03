@@ -60,6 +60,45 @@ public sealed class AbstractionsSmokeTests
     }
 
     [Fact]
+    public void EncryptedPayload_FormatVersion_DefaultsToUnboundFormatVersion()
+    {
+        // Backward compatibility: envelopes persisted by pre-versioning consumers carry no
+        // stored version. Reconstructing with the original four positional arguments must
+        // yield the version-1 (no-AAD) format they were produced under — NOT the current
+        // version, which binds the ciphertext to its scope via AES-GCM associated data.
+        EncryptedPayload legacy = new([1, 2, 3], new byte[12], new WrappedKey("vault:v1:abc", "1"), Guid.NewGuid());
+
+        legacy.FormatVersion.Should().Be(EncryptedPayload.UnboundFormatVersion);
+        EncryptedPayload.UnboundFormatVersion.Should().Be(1, "version 1 is the legacy no-AAD format");
+        EncryptedPayload.ScopeBoundFormatVersion.Should().Be(2, "version 2 binds the scope as AAD");
+        EncryptedPayload.CurrentFormatVersion.Should().Be(
+            EncryptedPayload.ScopeBoundFormatVersion,
+            "scope binding is the current default envelope format");
+    }
+
+    [Fact]
+    public void EncryptedPayload_ValueEquality_IncludesFormatVersion()
+    {
+        // L13 extension: the manual Equals/GetHashCode must cover FormatVersion. Two
+        // envelopes identical in every byte but differing in version describe DIFFERENT
+        // wire formats and must never compare equal (nor collide intentionally in hashing).
+        byte[] ciphertext = [1, 2, 3, 4, 5];
+        byte[] nonce = new byte[12];
+        Guid keyId = Guid.NewGuid();
+        WrappedKey wrapped = new("vault:v1:abc", "1");
+
+        EncryptedPayload v1 = new(ciphertext, nonce, wrapped, keyId, FormatVersion: 1);
+        EncryptedPayload v2 = v1 with { FormatVersion = 2 };
+
+        v1.Should().NotBe(v2, "envelopes differing only in FormatVersion describe different wire formats");
+        v1.GetHashCode().Should().NotBe(v2.GetHashCode());
+
+        EncryptedPayload v1Duplicate = new([1, 2, 3, 4, 5], new byte[12], wrapped, keyId, FormatVersion: 1);
+        v1.Should().Be(v1Duplicate);
+        v1.GetHashCode().Should().Be(v1Duplicate.GetHashCode());
+    }
+
+    [Fact]
     public void Dek_Key_IsStoredByReference_SoCachesMustClone()
     {
         // This test pins the documented contract from tasks/lessons.md L3:
@@ -147,6 +186,7 @@ public sealed class AbstractionsSmokeTests
         string printed = envelope.ToString();
 
         printed.Should().NotContain(sensitiveCiphertext, "the wrapped ciphertext must never appear in ToString output");
+        printed.Should().Contain($"FormatVersion = {envelope.FormatVersion}", "the format version is not secret and aids debugging");
         printed.Should().Contain($"KeyId = {envelope.KeyId}");
         printed.Should().Contain($"CiphertextLength = {ciphertext.Length}");
         printed.Should().Contain($"NonceLength = {nonce.Length}");

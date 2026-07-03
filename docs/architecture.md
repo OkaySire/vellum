@@ -33,11 +33,20 @@ flowchart LR
     KID[KeyId audit only] --> ENV
 ```
 
-Everything highlighted as `ENV` — ciphertext, nonce, wrapped DEK, audit KeyId — goes into a
-single self-contained [`EncryptedPayload`](../src/Vellum.Abstractions/EncryptedPayload.cs)
+Everything highlighted as `ENV` — ciphertext, nonce, wrapped DEK, audit KeyId, plus a
+`FormatVersion` field — goes into a single self-contained
+[`EncryptedPayload`](../src/Vellum.Abstractions/EncryptedPayload.cs)
 record. A consumer that persists an envelope stores it complete in a single row and
 decrypts without any database lookup. This matches the design of the AWS Encryption SDK and
 Google Tink.
+
+By default the AES-GCM call also **binds the ciphertext to its scope** via associated data
+(`UTF8("vellum:aad:v2:scope:" + scope)` — envelope format version 2). Decryption
+reconstructs the same associated data from the caller-supplied scope, so an envelope
+encrypted for tenant A presented as tenant B's data fails the authentication tag check
+instead of decrypting. `VellumOptions.BindScopeToCiphertext` (default `true`) opts out to
+the legacy unbound format version 1 when the scope is genuinely unavailable at decrypt
+time.
 
 The classical alternative is to store only the `KeyId` alongside the ciphertext and look up
 the wrapped DEK in a side table on every decrypt. Vellum also supports that pattern (through
@@ -55,7 +64,7 @@ flowchart TB
     subgraph VellumCore[Vellum.Core]
         PE[PayloadEncryptor<br/>IPayloadEncryptor]
         DM[DekManager<br/>IDekManager]
-        CACHE[[IMemoryCache<br/>DEK TTL cache]]
+        CACHE[[VellumDekCache<br/>Vellum-private DEK TTL cache]]
     end
     subgraph Provider[KEK provider package]
         KEP[IKeyEncryptionProvider]
@@ -84,8 +93,11 @@ Four layers, each one mockable at the interface level:
    stores or caches; it just knows how to resolve an active DEK, run AES-GCM, and return a
    self-contained envelope.
 2. **`IDekManager`** coordinates the store and the provider, handles race conditions on DEK
-   creation, and owns the in-memory DEK cache. Every cache hit path returns a
-   `ValueTask<Dek>` so it stays synchronous and allocation-free.
+   creation and rotation (per-scope async lock + the 4-layer cross-process defence), and
+   owns the DEK cache. The cache is a dedicated `VellumDekCache` — never the application's
+   shared `IMemoryCache` — so other in-process code cannot read plaintext DEKs and consumer
+   `SizeLimit` budgeting cannot evict them; key bytes are zeroed on eviction. Every cache
+   hit path returns a `ValueTask<Dek>` so it stays synchronous and allocation-free.
 3. **`IKeyEncryptionProvider`** wraps and unwraps DEKs against a secure backend. Vellum
    ships `Vellum.Vault` (HashiCorp Vault Transit) and `Vellum.Static` (dev-only). Cloud
    providers (`Vellum.AzureKeyVault`, `Vellum.AwsKms`, `Vellum.GcpKms`) are planned for
@@ -109,7 +121,7 @@ stateDiagram-v2
     Creating --> Racing: unique violation<br/>another process won
     Racing --> Active: reload winner<br/>discard losing plaintext
     Active --> Rotating: RotateDekAsync(scope)
-    Rotating --> Inactive: DeactivateAllAsync<br/>+ create fresh active
+    Rotating --> Inactive: store.RotateAsync<br/>atomic swap (deactivate + insert)
     Inactive --> Historical: no new encryption<br/>still decryptable
     Historical --> [*]: evicted when<br/>no ciphertexts reference it
     Active --> Cached: first read<br/>CacheActiveDek(scope)
@@ -127,15 +139,20 @@ stateDiagram-v2
   unwraps the winner's `WrappedKey`, and returns that.
 - **Active.** Exactly one key per scope can be `IsActive = true` at any time. Subsequent
   encrypts for the same scope hit the DEK cache and never touch the store.
-- **Rotating → Inactive.** `RotateDekAsync` calls `DeactivateAllAsync(scope)` inside a
-  transaction before creating a fresh active key. Historical rows encrypted with the
-  previous DEK remain fully decryptable because envelopes are self-contained.
+- **Rotating → Inactive.** `RotateDekAsync` generates and wraps the new DEK *first*, then
+  swaps the active key via `IEncryptionKeyStore.RotateAsync` — deactivate-old plus
+  insert-new in a single atomic transaction — and only then replaces (never removes) the
+  cache entry. If the KEK provider or the store fails at any point, the old key stays
+  active *and* cached: a scope is never observed without an active DEK. Historical rows
+  encrypted with the previous DEK remain fully decryptable because envelopes are
+  self-contained.
 - **Historical.** An inactive DEK never participates in new encryptions. It stays in the
   store forever (or until you manually evict it) so that historical ciphertexts can still
   be decrypted. If you delete a historical DEK, every ciphertext that references it
   becomes unrecoverable.
-- **Cached.** Any state transition that produces a plaintext DEK also populates
-  `IMemoryCache`. The cache entry TTL is `VellumOptions.DekCacheTtl` (default 30 minutes).
+- **Cached.** Any state transition that produces a plaintext DEK also populates the
+  Vellum-private `VellumDekCache` (evicted, expired, or replaced entries have their key
+  bytes zeroed). The cache entry TTL is `VellumOptions.DekCacheTtl` (default 30 minutes).
   Set it to `TimeSpan.Zero` to disable caching entirely — see
   [FAQ — What's the performance impact of the DEK cache?](faq.md#whats-the-performance-impact-of-the-dek-cache).
 
@@ -143,9 +160,9 @@ stateDiagram-v2
 
 Vellum is multi-tenant by construction. The tenant boundary is an opaque `scope` string —
 Vellum never interprets its content; the consumer picks the convention (`tenant:{id}`,
-`bus:{id}`, `user:{id}`, …). The `scope` flows through **four layers**, and each layer
-re-verifies it. A bug in any one layer does not compromise isolation because the other
-three still fire.
+`bus:{id}`, `user:{id}`, …). The `scope` flows through **five layers**, and each layer
+re-verifies it. A bug in any one layer does not compromise isolation because the others
+still fire.
 
 | Layer | Partitioning | Where |
 |---|---|---|
@@ -153,6 +170,7 @@ three still fire.
 | **Store (historical defence)** | `WHERE keyId = @keyId AND scope = @scope` — a caller guessing a `Guid` cannot retrieve another tenant's key | [lesson L1](#where-to-find-lesson-references) — also bypasses tenant query filters so infrastructure DEKs are not tenant-filtered |
 | **Cache** | `vellum:dek:active:{scope}` and `vellum:dek:id:{scope}:{keyId}` | `DekManager.BuildActiveCacheKey` / `BuildKeyIdCacheKey` — see [lesson L15](#where-to-find-lesson-references) |
 | **Manager** | fast-path re-verification that cached `Dek.KeyId` matches the requested `KeyId` | `DekManager.GetDekByKeyIdAsync` belt-and-braces fail-closed (EventId 1003) |
+| **Envelope (cryptographic)** | format version 2 ciphertexts carry the scope as AES-GCM associated data — an envelope moved between tenants fails the tag check at decrypt | `PayloadEncryptor.EncryptAsync` / `DecryptAsync`, `VellumOptions.BindScopeToCiphertext` |
 | **Provider** | irrelevant — wrap/unwrap is symmetric over the KEK regardless of tenant | N/A |
 
 > **Why re-verify scope on the cache fast path?** The cache key already contains the scope,
@@ -238,14 +256,21 @@ All four layers are exercised by the concurrency test suite
 `Vellum.EntityFrameworkCore.Tests`), which runs 8 contexts in parallel against a shared
 temporary SQLite file (see lesson L21 for why not `:memory:`).
 
-A future `0.2.0` release may replace layers 1–3 with a `pg_advisory_xact_lock` for
-PostgreSQL deployments — the 4-layer design is provider-agnostic and works on every major
-relational backend, but the advisory-lock approach would be simpler where it is supported.
+Since `0.2.0`, a **per-scope async lock** (`SemaphoreSlim` per scope, cache-hit fast path
+stays lock-free) is shared between the create, rotate, and slow-read paths inside a single
+process. It eliminates the in-process variants of these races at the source — the cache
+re-poisoning race where a slow in-flight read re-cached a freshly-deactivated DEK after a
+rotation, the KEK-provider stampede where N concurrent cache misses each round-tripped to
+Vault, and spurious "no concurrent winner" errors from create-vs-rotate interleavings. The
+4-layer defence remains as the cross-process guarantee. A future release may additionally
+adopt `pg_advisory_xact_lock` for PostgreSQL deployments — the 4-layer design is
+provider-agnostic and works on every major relational backend, but the advisory-lock
+approach would be simpler where it is supported.
 
 ## Memory hygiene
 
 Plaintext DEK bytes are sensitive and must leave memory as soon as possible. Vellum takes
-four concrete steps:
+five concrete steps:
 
 1. **Clone before return.** Every path that returns a `Dek` from the cache returns a fresh
    `new Dek((byte[])source.Key.Clone(), ...)`. Callers are free to
@@ -259,6 +284,10 @@ four concrete steps:
    it generated but never persisted is zeroed before unwrapping the winner.
 4. **Zero on wrap failure.** If `IKeyEncryptionProvider.WrapAsync` throws, the freshly
    generated plaintext DEK is zeroed before the exception propagates.
+5. **Zero on cache eviction.** Every `VellumDekCache` entry carries a post-eviction
+   callback that scrubs the cached key bytes when the entry is evicted, expired, or
+   replaced, and the cache compacts itself on dispose so all remaining plaintext DEKs are
+   scrubbed at shutdown.
 
 Vellum does **not** try to defeat memory scanning or forensic tooling — a sufficiently
 privileged attacker with a kernel debugger or a process dump can read the DEK bytes while
@@ -300,13 +329,20 @@ This means two things in practice:
 
 ## Provider-agnostic design
 
-`IKeyEncryptionProvider` is the only seam between Vellum and a secure backend. It has two
-methods:
+`IKeyEncryptionProvider` is the only seam between Vellum and a secure backend. It has
+three methods:
 
 ```csharp
 Task<WrappedKey> WrapAsync(ReadOnlyMemory<byte> dek, CancellationToken cancellationToken = default);
 Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default);
+Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default);
 ```
+
+`RewrapAsync` re-encrypts a wrapped DEK under the provider's current KEK version without
+exposing the plaintext to the caller — `Vellum.Vault` uses Transit's native `/rewrap`
+endpoint, so the plaintext never leaves Vault. It backs the KEK-retirement tooling
+(`VellumRewrapService`, `IPayloadEncryptor.RewrapPayloadAsync`) documented in the
+[key rotation runbook](kek-rotation.md).
 
 Everything else Vellum does — cache, scope, store, rotation — works identically regardless
 of which backend is plugged in. The current and planned providers are:
@@ -325,6 +361,20 @@ of which backend is plugged in. The current and planned providers are:
 > is 270 lines and is the reference implementation), and contributions upstream are
 > welcome. Until `0.3.0` ships, Vellum officially supports Vault Transit for production
 > workloads only.
+
+### The Vault HTTP pipeline
+
+`Vellum.Vault` builds its typed `HttpClient` as a small handler pipeline. The standard
+HTTP **resilience handler** (retries on transient failures with exponential backoff,
+circuit breaker, per-attempt and total timeouts derived from `VaultOptions.HttpTimeout`)
+is outermost and enabled by default (`EnableResilience = false` opts out). Inside it sits
+the **authentication handler** (`VaultAuthenticationHandler`), which fetches the token per
+request from `IVaultTokenProvider` and stamps the `X-Vault-Token` header — so every retry
+attempt gets a fresh-token opportunity. A `403` invalidates the cached token and retries
+exactly once with a fresh one. Two token providers ship: `StaticVaultTokenProvider` (a
+fixed token) and `AppRoleVaultTokenProvider` (AppRole login with a cached token,
+automatically re-acquired at `TokenRenewalThreshold` — 80 % of the lease by default);
+consumers can register their own `IVaultTokenProvider` for other Vault auth methods.
 
 A note on `WrappedKey.ProviderVersion`: the field is a `string`, not an `int`, because
 every cloud provider uses a different version identifier format. HashiCorp Vault returns

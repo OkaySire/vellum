@@ -120,6 +120,12 @@ public sealed class InMemoryServiceCollectionExtensionsTests
         public Task DeactivateAllAsync(string scope, CancellationToken cancellationToken = default)
             => Task.CompletedTask;
 
+        public Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default)
+            => Task.FromResult(newKey);
+
+        public Task<EncryptionKey> UpdateWrappedKeyAsync(Guid keyId, string scope, WrappedKey newWrappedKey, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("Not used by these tests.");
+
         public Task<IReadOnlyList<EncryptionKey>> GetHistoricalAsync(string scope, CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<EncryptionKey>>(Array.Empty<EncryptionKey>());
 

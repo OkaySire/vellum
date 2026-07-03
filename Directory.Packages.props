@@ -6,22 +6,31 @@
   </PropertyGroup>
 
   <ItemGroup Label="Core runtime">
-    <PackageVersion Include="Microsoft.Extensions.Caching.Abstractions" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.Logging" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.Options" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.Extensions.Http" Version="9.0.9" />
+    <PackageVersion Include="Microsoft.Extensions.Caching.Abstractions" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.Extensions.Logging" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.Extensions.Options" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="9.0.17" />
+    <!-- dotnet/extensions family — versioned 9.N.0 (monthly), not 9.0.N like the runtime
+         extensions above. 9.10.0 is the newest of the 9.x line; it requires runtime
+         extensions >= 9.0.10, satisfied by the 9.0.17 train pinned above. -->
+    <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="9.10.0" />
   </ItemGroup>
 
   <ItemGroup Label="EF Core">
-    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.9" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.9" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.17" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.17" />
+    <!-- Transitive pin (CentralPackageTransitivePinningEnabled): lifts the native SQLite
+         bundle pulled by Microsoft.EntityFrameworkCore.Sqlite (floor [2.1.10, )) to the
+         3.x line — the 2.1.x line is vulnerable to GHSA-2m69-gcr7-jv3q (fixed in the
+         SQLite 3.50.x natives shipped by bundle 3.0.x). Tests-only dependency. -->
+    <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <!-- Samples only (samples/AspNetCore.Postgres.Vault). Not referenced by any
          production package — Vellum.EntityFrameworkCore stays provider-agnostic. -->
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />

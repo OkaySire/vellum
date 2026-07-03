@@ -79,24 +79,27 @@ following classes of bugs permanently:
 | **Stable EventId logging** | Every `DekManager` log line has a deterministic EventId (`1001` not-found, `1002` cross-scope, `1003` cache invariant violation, …). SIEM rule authoring on these is trivial and does not drift when log messages are reworded. | `src/Vellum.Core/DekManager.cs` LoggerMessage block |
 | **`ValidateOnStart()` on every options type** | `VellumOptions`, `VaultOptions`, `StaticOptions`, `VellumEntityFrameworkOptions` all have validators that run at host start. Misconfiguration fails the boot, not the first request. | `*ServiceCollectionExtensions.Add*` |
 | **Self-contained envelopes** | `EncryptedPayload` carries its own wrapped DEK, so decryption has zero store round-trips. This is the same design as the AWS Encryption SDK and Google Tink. | `EncryptedPayload.WrappedDek` |
+| **Scope-bound ciphertexts** | By default the scope is baked into the AES-GCM associated data (envelope format version 2), so an envelope moved between tenants fails the tag check instead of decrypting. Hand-rolled layers almost never use AAD. | `VellumOptions.BindScopeToCiphertext`, `EncryptedPayload.ScopeBoundFormatVersion` |
 
 ## What you'll have to reimplement or carry locally
 
-Vellum is deliberately narrow. Three consumer concerns are out of scope for the core
-packages and you will need to carry them locally during the migration window and possibly
-beyond:
+Vellum is deliberately narrow. A few consumer concerns are out of scope for the core
+packages — some have since shipped as opt-in packages, others you will need to carry
+locally during the migration window and possibly beyond:
 
 | Concern | Status in Vellum | Workaround for now |
 |---|---|---|
-| **Background DEK rotation worker** | Planned for `Vellum.Rotation` (0.4.0) | Keep your existing `BackgroundService`. Replace the "generate + wrap + persist" body with a single `await dekManager.RotateDekAsync(scope, ct);` call. See the FAQ for a 30-line sketch. |
-| **OpenTelemetry metrics / spans** | Planned for `Vellum.AspNetCore` (0.4.0) | Subscribe to the `LoggerMessage`-generated log entries and emit counters / histograms yourself, or wait for `0.4.0`. |
-| **ASP.NET Core health checks** | Planned for `Vellum.AspNetCore` (0.4.0) | If you need a "Vault reachable?" health check today, write a trivial `IHealthCheck` that calls `IKeyEncryptionProvider.WrapAsync` with a throwaway buffer. |
+| **Background DEK rotation worker** | **Shipped** — opt-in `Vellum.Rotation` package (0.2.0) | Delete your existing `BackgroundService` and register `services.AddVellumRotation(o => ...)` instead (age-gated rotation, per-scope retry with backoff inside the tick). |
+| **OpenTelemetry metrics / spans** | Planned for `Vellum.AspNetCore` | Subscribe to the `LoggerMessage`-generated log entries and emit counters / histograms yourself, or wait for the package. |
+| **ASP.NET Core health checks** | Planned for `Vellum.AspNetCore` | If you need a "Vault reachable?" health check today, write a trivial `IHealthCheck` that calls `IKeyEncryptionProvider.WrapAsync` with a throwaway buffer. |
 | **Feature-flagged encryption wrapper** | Documented pattern, not a built-in toggle | Either call your own `IOptions<FeatureFlags>` at every call site (simplest, most visible), or wrap `IPayloadEncryptor` with Scrutor's `services.Decorate<>`. See [`samples/FeatureFlagged`](../../samples/FeatureFlagged/README.md) for the reference implementation of both variants. |
 | **Automatic ciphertext re-encryption on rotation** | Out of scope forever | Vellum never re-encrypts historical payloads during rotation because envelopes are self-contained. If your compliance rules require re-encryption, write a background job that reads historical rows, decrypts, re-encrypts with the current DEK, and writes them back. |
 
 None of these is a blocker for day-1 adoption. The early adopter shipped to production on
 `0.1.0-preview.2` with the rotation worker and the feature-flag gate carried locally,
-then removed half the local carry in `preview.3` once the attribute landed.
+then removed half the local carry in `preview.3` once the attribute landed — and the
+locally-carried rotation worker itself became deletable when `Vellum.Rotation` shipped
+in `0.2.0`.
 
 ## Step-by-step recipe
 
@@ -304,8 +307,17 @@ This is the mechanical step. Every `await _encryptionService.EncryptAsync(plaint
 becomes `await _payloadEncryptor.EncryptStringAsync(plaintext, $"bus:{tenantId}")` (or
 whatever scope convention you picked in step 4). Every
 `await _encryptionService.DecryptAsync(ciphertext, nonce, keyId, tenantId)` becomes
-`await _payloadEncryptor.DecryptStringAsync(envelope)` — and `envelope` is constructed from
-the row's ciphertext/nonce/wrappedDek columns.
+`await _payloadEncryptor.DecryptStringAsync(envelope, $"bus:{tenantId}")` — the scope is
+required at decrypt too, and `envelope` is constructed from the row's
+ciphertext/nonce/wrappedDek columns.
+
+> **Persist `FormatVersion`.** New Vellum-native envelopes are scope-bound format
+> version 2 (the scope is baked into the AES-GCM associated data, so the decrypt scope
+> must match the encrypt scope). If you store envelopes field-by-field, add a
+> `format_version` column, persist `EncryptedPayload.FormatVersion`, and restore it
+> verbatim. Rows migrated from your legacy schema have no stored version: reconstructing
+> them with the original four positional arguments defaults to format version 1 (the
+> legacy unbound layout), which is correct — they decrypt under any scope argument.
 
 If your existing schema stores only `(ciphertext, nonce, keyId)` per encrypted row and
 **not** the wrapped DEK, you have two choices:
@@ -436,9 +448,11 @@ On top of the seeded rows, assert the following:
 Then the round-trip tests:
 
 - Decrypt a pre-migration seeded encrypted row via `IPayloadEncryptor.DecryptStringAsync`
-  all the way through to the plaintext. If the seed used the legacy schema, you will need
-  to reconstruct the `EncryptedPayload` from the row columns; if the seed used the new
-  "wrapped-dek-on-row" schema (see step 9 option 1), it is a direct map.
+  (passing the row's scope) all the way through to the plaintext. If the seed used the
+  legacy schema, you will need to reconstruct the `EncryptedPayload` from the row columns
+  (the 4-argument construction is correct for legacy rows — it defaults to format
+  version 1); if the seed used the new "wrapped-dek-on-row" schema (see step 9 option 1),
+  it is a direct map.
 - Encrypt a brand-new plaintext via `IPayloadEncryptor.EncryptStringAsync` and read it
   back in a fresh DI scope. This proves the write path works end-to-end.
 - **Interleave the two**: encrypt new → decrypt historical → decrypt new → decrypt
@@ -487,8 +501,10 @@ unchanged (the new code path is not hit). Then flip the flag on for staging and 
 - Monitor for `InvalidOperationException` with the string "does not belong to scope"
   (would indicate a bug in your scope convention — a call site is reconstructing the
   scope differently for encrypt vs decrypt).
-- Monitor for `KEK provider is temporarily unavailable` — if this fires, your retry /
-  circuit-breaker policy on the Vault `HttpClient` is not wired correctly.
+- Monitor for KEK-provider connectivity errors. Vellum's Vault client retries transient
+  failures automatically (standard resilience handler, on by default) — an error that
+  reaches your logs means the outage outlasted the retries, or
+  `VaultOptions.EnableResilience` was switched off.
 
 The EventIds in `DekManager` (`1001`, `1002`, `1003`) are designed for exactly this kind
 of alerting — add a SIEM rule per EventId.
@@ -506,10 +522,10 @@ Roll out the feature flag to production in three waves:
 3. **100%.** Let it soak for a week, then delete the feature flag and the old code path
    in a follow-up PR.
 
-Once the follow-up PR lands, the migration is done. The only remaining local carry is
-your rotation `BackgroundService` and whatever feature-flag wiring you kept for the
-encryption toggle. Both are ~50-line classes and will go away when `Vellum.Rotation` and
-`Vellum.AspNetCore` ship in 0.4.0.
+Once the follow-up PR lands, the migration is done. Replace your rotation
+`BackgroundService` with the opt-in `Vellum.Rotation` package
+(`services.AddVellumRotation(...)`). The only remaining local carry is whatever
+feature-flag wiring you kept for the encryption toggle — a ~50-line class.
 
 ## Schema mapping
 

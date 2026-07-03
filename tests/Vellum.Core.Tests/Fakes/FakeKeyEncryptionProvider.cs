@@ -17,6 +17,14 @@ public sealed class FakeKeyEncryptionProvider : IKeyEncryptionProvider
 
     public int UnwrapCalls { get; private set; }
 
+    public int RewrapCalls { get; private set; }
+
+    /// <summary>
+    /// Test hook: handles (ciphertexts) for which <see cref="RewrapAsync"/> throws, simulating
+    /// a KEK provider that fails to rewrap specific keys mid-sweep.
+    /// </summary>
+    public HashSet<string> FailRewrapHandles { get; } = new(StringComparer.Ordinal);
+
     public Task<WrappedKey> WrapAsync(ReadOnlyMemory<byte> dek, CancellationToken cancellationToken = default)
     {
         WrapCalls++;
@@ -35,5 +43,28 @@ public sealed class FakeKeyEncryptionProvider : IKeyEncryptionProvider
         }
 
         return Task.FromResult((byte[])bytes.Clone());
+    }
+
+    public Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+    {
+        RewrapCalls++;
+        ArgumentNullException.ThrowIfNull(wrappedKey);
+
+        if (FailRewrapHandles.Contains(wrappedKey.Ciphertext))
+        {
+            throw new InvalidOperationException($"Fake provider: rewrap deliberately failed for handle '{wrappedKey.Ciphertext}'.");
+        }
+
+        if (!_wrapped.TryGetValue(wrappedKey.Ciphertext, out byte[]? bytes))
+        {
+            throw new InvalidOperationException($"Fake provider: unknown handle '{wrappedKey.Ciphertext}'.");
+        }
+
+        // Mirror a real rewrap: the same DEK bytes become reachable under a NEW handle wrapped
+        // under the "current" provider version. The old handle stays valid (Vault keeps old
+        // versions unwrappable until min_decryption_version is raised).
+        string newHandle = Guid.NewGuid().ToString("N");
+        _wrapped[newHandle] = (byte[])bytes.Clone();
+        return Task.FromResult(new WrappedKey(Ciphertext: newHandle, ProviderVersion: "v2"));
     }
 }

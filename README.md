@@ -8,7 +8,7 @@
 [![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0-512BD4)](https://dotnet.microsoft.com/)
 [![Build & Test](https://github.com/OkaySire/vellum/actions/workflows/build.yml/badge.svg)](https://github.com/OkaySire/vellum/actions/workflows/build.yml)
 
-> **Status: `0.1.0` — First stable drop. Pre-1.0 (API may evolve in 0.2.0+, breaking changes allowed per semver). Production use is supported but cloud KMS providers (Azure Key Vault, AWS KMS, GCP KMS) are planned for 0.3.0.**
+> **Status: `0.2.0` — Pre-1.0 (API may evolve, breaking changes allowed per semver; see [CHANGELOG](CHANGELOG.md) for the 0.2.0 breaking changes). Production use is supported but cloud KMS providers (Azure Key Vault, AWS KMS, GCP KMS) are planned for 0.3.0.**
 
 ---
 
@@ -29,14 +29,14 @@ This pattern lets you rotate keys at the KEK level without re-encrypting every p
 |---|---|
 | `Vellum.Abstractions` | Interfaces + value objects. Zero dependencies. |
 | `Vellum.Core` | `DekManager` + `PayloadEncryptor`. AES-GCM via `System.Security.Cryptography`. |
-| `Vellum.Vault` | HashiCorp Vault Transit KEK provider. |
+| `Vellum.Vault` | HashiCorp Vault Transit KEK provider. Token + AppRole auth, built-in HTTP resilience. |
 | `Vellum.AzureKeyVault` | Azure Key Vault KEK provider _(Phase 3)_. |
 | `Vellum.AwsKms` | AWS KMS KEK provider _(Phase 3)_. |
 | `Vellum.GcpKms` | Google Cloud KMS KEK provider _(Phase 3)_. |
 | `Vellum.Static` | Static key provider **for dev/test only — INSECURE**. |
 | `Vellum.EntityFrameworkCore` | EF Core-backed key store. |
 | `Vellum.InMemory` | In-memory key store for tests. |
-| `Vellum.Rotation` | Opt-in background DEK rotation _(Phase 4)_. |
+| `Vellum.Rotation` | Opt-in background DEK rotation hosted service. |
 | `Vellum.AspNetCore` | DI extensions + health checks _(Phase 4)_. |
 
 ## Quickstart
@@ -58,9 +58,13 @@ flow via `UseVellum` on the `DbContextOptionsBuilder` — configure them once, n
 services.AddVellum(o => o.DekCacheTtl = TimeSpan.FromMinutes(30));
 services.AddVaultProvider(o =>
 {
-    o.Address = "http://vault:8200";
+    o.Address = "https://vault:8200";   // plain http:// is rejected by default
     o.Token   = builder.Configuration["Vault:Token"]!;
     o.KeyName = "my-kek";
+    // Production: prefer AppRole over a static token — tokens are then re-acquired
+    // automatically before they expire (o.AuthMethod = VaultAuthMethod.AppRole
+    // + o.RoleId / o.SecretId). Requests are retried on transient failures by
+    // default (o.EnableResilience = false to opt out).
 });
 services.AddDbContext<AppDbContext>(options => options
     .UseNpgsql(builder.Configuration.GetConnectionString("App"))
@@ -79,17 +83,47 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> opts) : DbContex
 
 // Usage (inject IPayloadEncryptor anywhere)
 EncryptedPayload envelope = await encryptor.EncryptStringAsync("hello", scope: "tenant:42");
-string roundtrip          = await encryptor.DecryptStringAsync(envelope);
+string roundtrip          = await encryptor.DecryptStringAsync(envelope, scope: "tenant:42");
 ```
 
 The envelope carries its own wrapped DEK, so decryption is self-contained — no second
-DB round-trip. `DecryptAsync` is backed by an in-memory cache keyed by the wrapped
-ciphertext (see [#6](https://github.com/OkaySire/vellum/issues/6)), so read-heavy
-workloads pay at most one KEK round-trip per distinct DEK.
+DB round-trip. By default the ciphertext is also **bound to its scope** via AES-GCM
+associated data (envelope format version 2): decrypting requires the same scope, so an
+envelope copied between tenants fails the authentication tag check instead of decrypting.
+Opt out with `VellumOptions.BindScopeToCiphertext = false` if the scope is genuinely
+unavailable at decrypt time; consumers persisting envelopes field-by-field must persist
+`EncryptedPayload.FormatVersion` alongside the other fields. `DecryptAsync` is backed by
+a Vellum-private in-memory cache keyed by the wrapped ciphertext (see
+[#6](https://github.com/OkaySire/vellum/issues/6)), so read-heavy workloads pay at most
+one KEK round-trip per distinct DEK.
 
 For more complete wiring — feature-flagged rollouts, snake_case schemas, migrations
 from a legacy encryption layer, `appsettings.json` bridging — see the
 [`samples/`](samples/) folder and [`docs/consumer-options-bridging.md`](docs/consumer-options-bridging.md).
+
+### Background DEK rotation (`Vellum.Rotation`)
+
+Rotation is opt-in — `Vellum.Core` never starts a background service. Add the
+`Vellum.Rotation` package and register the worker:
+
+```csharp
+services.AddVellumRotation(o =>
+{
+    o.RotationInterval   = TimeSpan.FromHours(24); // how often the worker ticks
+    o.MaxDekAge          = TimeSpan.FromHours(24); // rotate only keys at least this old
+    o.MaxRetriesPerScope = 3;                      // retry with backoff inside the tick
+});
+```
+
+Each tick rotates only the scopes whose active DEK has reached `MaxDekAge`; transient
+KEK-provider failures are retried per scope with exponential backoff and jitter inside
+the tick, and a failed scope never blocks the others. Rotation is fail-safe: if the KEK
+provider fails mid-rotation, the previous key stays active. KEK rewrap tooling
+(`VellumRewrapService.RewrapStoredKeysAsync` + `IPayloadEncryptor.RewrapPayloadAsync`)
+re-encrypts stored keys and persisted envelopes under the current KEK version, making it
+safe to retire old KEK versions. For the full operational picture — including KEK rotation
+on the Vault side and the `min_decryption_version` procedure — see the
+[key rotation runbook](docs/kek-rotation.md).
 
 ### Design-time scaffolder (`dotnet ef migrations add`)
 

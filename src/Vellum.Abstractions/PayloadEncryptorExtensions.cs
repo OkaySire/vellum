@@ -46,18 +46,20 @@ public static class PayloadEncryptorExtensions
     /// </summary>
     /// <param name="encryptor">The encryptor instance.</param>
     /// <param name="payload">The self-contained envelope.</param>
+    /// <param name="scope">The scope the envelope was encrypted under. Required (non-empty) for format version 2 envelopes; ignored for legacy version 1 envelopes. See <see cref="IPayloadEncryptor.DecryptAsync(EncryptedPayload, string, System.Threading.CancellationToken)"/>.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The original plaintext string (UTF-8 decoded).</returns>
     /// <exception cref="System.ArgumentNullException">Thrown when <paramref name="encryptor"/> or <paramref name="payload"/> is <see langword="null"/>.</exception>
     public static async Task<string> DecryptStringAsync(
         this IPayloadEncryptor encryptor,
         EncryptedPayload payload,
+        string scope,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(encryptor);
         ArgumentNullException.ThrowIfNull(payload);
 
-        byte[] plaintextBytes = await encryptor.DecryptAsync(payload, cancellationToken).ConfigureAwait(false);
+        byte[] plaintextBytes = await encryptor.DecryptAsync(payload, scope, cancellationToken).ConfigureAwait(false);
         return Encoding.UTF8.GetString(plaintextBytes);
     }
 }

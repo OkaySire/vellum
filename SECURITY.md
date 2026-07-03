@@ -2,13 +2,15 @@
 
 ## Supported Versions
 
-Vellum is currently in `0.1.x-preview`. **Preview versions are not supported for production use** and receive security fixes on a best-effort basis.
+The current release line is `0.2.x`. Vellum is pre-`1.0`: security fixes land on the current minor release line, and the previous line receives critical security fixes on a best-effort basis until the next minor ships.
 
 A formal support policy will be published with the `1.0.0` release.
 
 | Version | Supported |
 |---------|-----------|
-| `0.1.x-preview` | Best-effort only |
+| `0.2.x` | Yes — current release line |
+| `0.1.x` | Critical security fixes only (best-effort) |
+| `0.1.x-preview` | No — upgrade to `0.2.x` |
 | `< 0.1.0` | No |
 
 ## Reporting a vulnerability

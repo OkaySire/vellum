@@ -81,7 +81,9 @@ Console.WriteLine($"Ciphertext: {envelope.Ciphertext.Length} bytes (plaintext + 
 Console.WriteLine($"Nonce:      {envelope.Nonce.Length} bytes");
 Console.WriteLine($"Provider:   {envelope.WrappedDek.ProviderVersion}");
 
-string roundtrip = await encryptor.DecryptStringAsync(envelope);
+// Decryption requires the same scope: envelopes are scope-bound by default
+// (format version 2 — the scope is baked into the AES-GCM associated data).
+string roundtrip = await encryptor.DecryptStringAsync(envelope, scope: "tenant:demo");
 Console.WriteLine();
 Console.WriteLine($"Decrypted:  \"{roundtrip}\"");
 ```
@@ -130,16 +132,20 @@ On `EncryptStringAsync`, Vellum:
    - cached the unwrapped DEK so the next encrypt for the same scope is a lock-free
      dictionary lookup.
 2. Generated a 12-byte AES-GCM nonce.
-3. Encrypted the UTF-8 bytes of `"hello from Vellum"` with `AesGcm`.
+3. Encrypted the UTF-8 bytes of `"hello from Vellum"` with `AesGcm`, binding the scope into
+   the AES-GCM associated data (envelope format version 2, the default — see
+   `VellumOptions.BindScopeToCiphertext`).
 4. Zeroed the plaintext DEK bytes in a `finally` block.
 5. Returned a self-contained `EncryptedPayload` carrying the ciphertext, nonce, wrapped DEK,
-   and audit `KeyId`.
+   audit `KeyId`, and `FormatVersion`.
 
 On `DecryptStringAsync`, Vellum read the wrapped DEK directly off the envelope, unwrapped it
 once, cached the result keyed on a hash of the wrapped ciphertext (see
 [architecture — memory hygiene](architecture.md#memory-hygiene) and lesson L24 in the FAQ for
-why this is safe without scope-partitioning), ran AES-GCM in decrypt mode, and returned the
-UTF-8 string.
+why this is safe without scope-partitioning), reconstructed the scope associated data from
+the scope you passed (a wrong or missing scope fails the authentication tag check — that is
+the multi-tenant envelope-swap defence), ran AES-GCM in decrypt mode, and returned the UTF-8
+string.
 
 ## 2. Upgrade to a real KEK with `Vellum.Vault`
 
@@ -172,7 +178,8 @@ curl -sf -X POST \
 
 > **dev-root is not a real token.** Vault's `-dev` mode is only for local use. Production
 > tokens come from an auth method — Kubernetes, AppRole, JWT, cert, … — and are never
-> pasted into a shell.
+> pasted into a shell. `Vellum.Vault` supports **AppRole natively** and it is the
+> recommended production auth method: see [§2.4](#24-how-vault-options-should-flow-in-a-real-app).
 
 ### 2.2 Swap the provider package
 
@@ -199,6 +206,9 @@ services.AddVellum(opts => opts.DekCacheTtl = TimeSpan.FromMinutes(30));
 services.AddVaultProvider(opts =>
 {
     opts.Address = "http://127.0.0.1:8200";
+    opts.AllowInsecureHttp = true;      // ← dev server only. Plain http:// is rejected by
+                                        //   default because it sends the token and plaintext
+                                        //   DEKs in cleartext. NEVER enable in production.
     opts.Token   = "dev-root";          // ← load from a secret store in real code
     opts.KeyName = "vellum-quickstart-kek";
 });
@@ -209,7 +219,7 @@ await using ServiceProvider provider = services.BuildServiceProvider();
 IPayloadEncryptor encryptor = provider.GetRequiredService<IPayloadEncryptor>();
 
 EncryptedPayload envelope = await encryptor.EncryptStringAsync("hello from Vault", "tenant:demo");
-string roundtrip          = await encryptor.DecryptStringAsync(envelope);
+string roundtrip          = await encryptor.DecryptStringAsync(envelope, "tenant:demo");
 
 Console.WriteLine($"Provider version: {envelope.WrappedDek.ProviderVersion}"); // e.g. "v1"
 Console.WriteLine($"Decrypted:        \"{roundtrip}\"");
@@ -226,6 +236,26 @@ The snippet above hard-codes `Token = "dev-root"` for brevity. A real app binds
 [consumer options bridging](consumer-options-bridging.md) for the pattern — the short
 version is `services.AddOptions<VaultOptions>().Configure<IOptions<YourEncryptionOptions>>(...)`,
 and you should **never** call `services.BuildServiceProvider()` inside a `Configure` delegate.
+
+For production, prefer **AppRole** authentication over a static token. A fixed periodic
+token that expires causes a silent outage; AppRole tokens are re-acquired automatically
+(a fresh login fires once the cached token passes `TokenRenewalThreshold`, 80 % of its
+lease by default, and a `403` triggers an immediate re-login plus one retry):
+
+```csharp
+services.AddVaultProvider(opts =>
+{
+    opts.Address    = "https://vault.example.com:8200";
+    opts.AuthMethod = VaultAuthMethod.AppRole;
+    opts.RoleId     = configuration["Vault:RoleId"]!;    // from a secret store
+    opts.SecretId   = configuration["Vault:SecretId"]!;  // from a secret store
+    opts.KeyName    = "vellum-quickstart-kek";
+});
+```
+
+Every Vault request also goes through the standard HTTP resilience handler by default
+(retries on transient failures, timeouts derived from `VaultOptions.HttpTimeout`); set
+`EnableResilience = false` inside the `AddVaultProvider` delegate to opt out.
 
 ## 3. Persistent storage with EF Core
 
@@ -309,6 +339,7 @@ services.AddVellum(opts => opts.DekCacheTtl = TimeSpan.FromMinutes(30));
 services.AddVaultProvider(opts =>
 {
     opts.Address = "http://127.0.0.1:8200";
+    opts.AllowInsecureHttp = true;      // dev server only — never in production
     opts.Token   = "dev-root";
     opts.KeyName = "vellum-quickstart-kek";
 });
@@ -330,7 +361,7 @@ using (IServiceScope scope = provider.CreateScope())
     IPayloadEncryptor encryptor = scope.ServiceProvider.GetRequiredService<IPayloadEncryptor>();
 
     EncryptedPayload envelope = await encryptor.EncryptStringAsync("persisted in postgres", "tenant:demo");
-    string roundtrip          = await encryptor.DecryptStringAsync(envelope);
+    string roundtrip          = await encryptor.DecryptStringAsync(envelope, "tenant:demo");
 
     Console.WriteLine($"Persisted KeyId:  {envelope.KeyId}");
     Console.WriteLine($"Decrypted:        \"{roundtrip}\"");
@@ -401,9 +432,11 @@ anything that can change — for example, user display names.
 
 ### 4.2 Rotate a DEK
 
-`IDekManager.RotateDekAsync(scope)` deactivates the current active DEK for `scope` and
-creates a new one. Historical envelopes stay decryptable because `EncryptedPayload` carries
-its own `WrappedDek` — rotation is a write-path operation only, it does not re-encrypt any
+`IDekManager.RotateDekAsync(scope)` generates and wraps a fresh DEK first, then atomically
+swaps it in as the scope's active key (deactivate-old + insert-new in a single
+transaction); if the KEK provider or the store fails mid-rotation, the old key stays
+active. Historical envelopes stay decryptable because `EncryptedPayload` carries its own
+`WrappedDek` — rotation is a write-path operation only, it does not re-encrypt any
 existing data.
 
 ```csharp
@@ -418,25 +451,39 @@ using (IServiceScope scope = provider.CreateScope())
 ```
 
 `RotateDekAsync` does **not** need to be on a schedule — you can call it from a controller
-(e.g. in response to a "rotate now" admin action) or from a background job. A shipped
-opt-in rotation worker (`Vellum.Rotation`) is planned for `0.4.0`; until then, the simplest
-pattern is a `BackgroundService` in your own host that iterates
-`IEncryptionKeyStore.GetActiveScopesAsync` and calls `RotateDekAsync` on each entry that has
-crossed its rotation interval. See
-[FAQ — How do I rotate DEKs without downtime?](faq.md#how-do-i-rotate-deks-without-downtime) for
-a code sketch.
+(e.g. in response to a "rotate now" admin action) or from a background job. For scheduled
+rotation, add the opt-in **`Vellum.Rotation`** package and register the hosted worker:
+
+```csharp
+services.AddVellumRotation(o =>
+{
+    o.RotationInterval = TimeSpan.FromHours(24); // how often the worker ticks
+    o.MaxDekAge        = TimeSpan.FromHours(24); // rotate only keys at least this old
+});
+```
+
+See the [key rotation runbook](kek-rotation.md) for the full operational picture, and
+[FAQ — How do I rotate DEKs without downtime?](faq.md#how-do-i-rotate-deks-without-downtime)
+for the failure semantics.
 
 ### 4.3 Decrypt a historical envelope
 
 If you have stored envelopes from before a rotation, nothing changes — `DecryptStringAsync`
 reads the embedded `WrappedDek` from the envelope and unwraps it through the KEK provider.
-No store round-trip, no scope dance, no version matching:
+No store round-trip, no version matching:
 
 ```csharp
-// Stored ciphertext + nonce + wrapped-DEK blob somewhere:
+// Stored ciphertext + nonce + wrapped-DEK blob + format version somewhere:
 EncryptedPayload historical = /* reconstruct from your DB columns */;
-string plaintext = await encryptor.DecryptStringAsync(historical);
+string plaintext = await encryptor.DecryptStringAsync(historical, "tenant:demo");
 ```
+
+> **Persist `FormatVersion`.** If you store envelopes field-by-field (one column per
+> `EncryptedPayload` field), persist `FormatVersion` alongside the other columns and
+> restore it verbatim — decryption rejects unknown versions fail-closed. Rows persisted
+> before Vellum 0.2.0 have no stored version; reconstructing them with the original four
+> positional arguments defaults to format version 1 (the legacy unbound layout), which is
+> correct and decrypts under any scope argument.
 
 If you need to iterate over **all** historical DEKs for a scope (for example, for an auditor
 who wants to list every key ever used), call

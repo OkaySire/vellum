@@ -1,5 +1,4 @@
 using System.Text;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Vellum;
@@ -58,7 +57,8 @@ static IPayloadEncryptor BuildEncryptor(bool encryptionEnabled)
     IEncryptionKeyStore store = new InMemoryEncryptionKeyStore(
         NullLogger<InMemoryEncryptionKeyStore>.Instance);
 
-    IMemoryCache cache = new MemoryCache(new MemoryCacheOptions());
+    // Vellum-owned DEK cache (M-C): never the application's shared IMemoryCache.
+    VellumDekCache cache = new();
 
     IDekManager dekManager = new DekManager(
         kek,
@@ -71,7 +71,9 @@ static IPayloadEncryptor BuildEncryptor(bool encryptionEnabled)
 
     IPayloadEncryptor inner = new PayloadEncryptor(
         dekManager,
+        kek,
         rng,
+        Options.Create(new VellumOptions()),
         NullLogger<PayloadEncryptor>.Instance);
 
     // Wrap with the feature-flag decorator. The real pattern uses IOptionsMonitor so the
@@ -90,6 +92,6 @@ static async Task RoundtripAsync(IPayloadEncryptor encryptor, string text, strin
         $"nonce-length={envelope.Nonce.Length}, " +
         $"provider={envelope.WrappedDek.ProviderVersion}");
 
-    byte[] roundtrip = await encryptor.DecryptAsync(envelope);
+    byte[] roundtrip = await encryptor.DecryptAsync(envelope, scope: "tenant:alpha");
     Console.WriteLine($"[{scenario}] decrypted: \"{Encoding.UTF8.GetString(roundtrip)}\"");
 }

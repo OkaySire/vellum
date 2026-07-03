@@ -46,4 +46,35 @@ public interface IKeyEncryptionProvider
     /// <exception cref="System.Security.Cryptography.CryptographicException">Thrown when the wrapped key is corrupted or tampered with.</exception>
     /// <exception cref="System.InvalidOperationException">Thrown when the provider cannot unwrap the key (for example, the KEK has been revoked).</exception>
     public Task<byte[]> UnwrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Re-encrypts (rewraps) a previously-wrapped Data Encryption Key under the provider's
+    /// <b>current</b> Key Encryption Key version.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Rewrapping is the building block for retiring old KEK versions: after the KEK is rotated,
+    /// every persisted wrapped DEK (key-store rows and the <see cref="EncryptedPayload.WrappedDek"/>
+    /// embedded in every envelope) still references the old version. Rewrapping refreshes the
+    /// wrapping without touching the plaintext payload — the DEK itself is unchanged, so existing
+    /// AES-GCM ciphertexts remain valid.
+    /// </para>
+    /// <para>
+    /// <b>Plaintext confinement.</b> The plaintext DEK is never exposed to the caller. Backends
+    /// with a native rewrap operation (for example, Vault Transit's <c>/rewrap</c> endpoint)
+    /// perform the re-encryption entirely inside the backend; where no native operation exists,
+    /// the implementation must unwrap and rewrap internally without letting the plaintext escape
+    /// the provider, zeroing the intermediate bytes when done.
+    /// </para>
+    /// <para>
+    /// <b>Fail closed.</b> Any error must throw. Implementations must never return the original
+    /// <paramref name="wrappedKey"/> unchanged to mask a failure.
+    /// </para>
+    /// </remarks>
+    /// <param name="wrappedKey">The wrapped DEK produced by a prior call to <see cref="WrapAsync(ReadOnlyMemory{byte}, CancellationToken)"/> (possibly under an older KEK version).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A new <see cref="WrappedKey"/> wrapping the same DEK under the current KEK version, with <see cref="WrappedKey.ProviderVersion"/> updated accordingly.</returns>
+    /// <exception cref="System.InvalidOperationException">Thrown when the provider cannot rewrap the key (for example, the original KEK version has been revoked).</exception>
+    /// <exception cref="System.Net.Http.HttpRequestException">Thrown when a remote provider is unreachable.</exception>
+    public Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default);
 }

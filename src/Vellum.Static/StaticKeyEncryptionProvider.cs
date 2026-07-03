@@ -196,6 +196,39 @@ public sealed partial class StaticKeyEncryptionProvider : IKeyEncryptionProvider
         }
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// <para>
+    /// The static provider has no backend, so — unlike Vault Transit's native <c>/rewrap</c>
+    /// endpoint — this implementation necessarily unwraps the DEK in process memory before
+    /// wrapping it again. The intermediate plaintext never escapes the provider and is zeroed
+    /// in a <c>finally</c> block, but it does transit the managed heap. This is consistent with
+    /// the provider's threat model: the KEK itself already lives in configuration, and the
+    /// provider is for <b>DEVELOPMENT USE ONLY</b>.
+    /// </para>
+    /// <para>
+    /// Because the wrap uses a fresh random nonce, the returned ciphertext always differs from
+    /// the input even though the wrapped DEK and the KEK version (<c>v1</c>) are unchanged.
+    /// </para>
+    /// </remarks>
+    public async Task<WrappedKey> RewrapAsync(WrappedKey wrappedKey, CancellationToken cancellationToken = default)
+    {
+        // UnwrapAsync performs all input validation (null/empty/prefix/base64/blob length) and
+        // fails closed on tampering via the AES-GCM tag check; WrapAsync re-encrypts under a
+        // fresh nonce. Both also emit the development-use warning.
+        byte[] dek = await UnwrapAsync(wrappedKey, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            WrappedKey rewrapped = await WrapAsync(dek, cancellationToken).ConfigureAwait(false);
+            LogRewrapSucceeded(_logger);
+            return rewrapped;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(dek);
+        }
+    }
+
     private byte[] DecodeKek()
     {
         // Validation has already rejected invalid base64 / wrong length at start-up, but we must
@@ -264,4 +297,10 @@ public sealed partial class StaticKeyEncryptionProvider : IKeyEncryptionProvider
         Level = LogLevel.Debug,
         Message = "Vellum.Static unwrap succeeded.")]
     private static partial void LogUnwrapSucceeded(ILogger logger);
+
+    [LoggerMessage(
+        EventId = 4,
+        Level = LogLevel.Debug,
+        Message = "Vellum.Static rewrap succeeded.")]
+    private static partial void LogRewrapSucceeded(ILogger logger);
 }

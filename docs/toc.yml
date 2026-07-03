@@ -4,6 +4,8 @@
   href: getting-started.md
 - name: Architecture
   href: architecture.md
+- name: Key rotation runbook
+  href: kek-rotation.md
 - name: FAQ
   href: faq.md
 - name: Comparison

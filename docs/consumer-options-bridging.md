@@ -11,7 +11,7 @@ Vellum's DI extensions take `Action<TOptions>` delegates:
 services.AddVellum(opts => { opts.DekCacheTtl = TimeSpan.FromMinutes(30); });
 services.AddVaultProvider(opts =>
 {
-    opts.Address = "http://vault.example:8200";
+    opts.Address = "https://vault.example:8200";
     opts.Token = "s.XXXX";
     opts.KeyName = "my-kek";
 });

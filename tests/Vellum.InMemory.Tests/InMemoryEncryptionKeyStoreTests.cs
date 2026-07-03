@@ -199,6 +199,123 @@ public sealed class InMemoryEncryptionKeyStoreTests
         (await store.GetActiveAsync(ScopeA)).Should().BeNull();
     }
 
+    // ---------- RotateAsync ----------
+
+    [Fact]
+    public async Task RotateAsync_AtomicallySwapsActiveKey()
+    {
+        InMemoryEncryptionKeyStore store = new();
+        EncryptionKey first = MakeKey(ScopeA);
+        await store.CreateAsync(first);
+
+        EncryptionKey replacement = MakeKey(ScopeA);
+        EncryptionKey returned = await store.RotateAsync(replacement);
+
+        returned.KeyId.Should().Be(replacement.KeyId);
+
+        EncryptionKey? active = await store.GetActiveAsync(ScopeA);
+        active.Should().NotBeNull();
+        active!.KeyId.Should().Be(replacement.KeyId);
+
+        IReadOnlyList<EncryptionKey> history = await store.GetHistoricalAsync(ScopeA);
+        history.Should().HaveCount(2);
+        history.Single(k => k.KeyId == first.KeyId).IsActive.Should().BeFalse(
+            "the previous active key must be deactivated by the same rotation");
+    }
+
+    [Fact]
+    public async Task RotateAsync_EmptyScope_InstallsActiveKey()
+    {
+        // Rotating a scope with no active key degenerates into a plain create — the contract
+        // only promises "after the call, newKey (or a concurrent winner) is the active key".
+        InMemoryEncryptionKeyStore store = new();
+        EncryptionKey key = MakeKey(ScopeA);
+
+        EncryptionKey returned = await store.RotateAsync(key);
+
+        returned.KeyId.Should().Be(key.KeyId);
+        (await store.GetActiveAsync(ScopeA))!.KeyId.Should().Be(key.KeyId);
+    }
+
+    [Fact]
+    public async Task RotateAsync_OnlyAffectsGivenScope()
+    {
+        InMemoryEncryptionKeyStore store = new();
+        EncryptionKey keyB = MakeKey(ScopeB);
+        await store.CreateAsync(MakeKey(ScopeA));
+        await store.CreateAsync(keyB);
+
+        await store.RotateAsync(MakeKey(ScopeA));
+
+        EncryptionKey? activeB = await store.GetActiveAsync(ScopeB);
+        activeB.Should().NotBeNull();
+        activeB!.KeyId.Should().Be(keyB.KeyId);
+    }
+
+    [Fact]
+    public async Task RotateAsync_InactiveKey_ThrowsFailClosed()
+    {
+        // Installing an inactive "new active key" would end the rotation with zero active keys
+        // for the scope — the exact incident RotateAsync exists to prevent.
+        InMemoryEncryptionKeyStore store = new();
+        await store.CreateAsync(MakeKey(ScopeA));
+        EncryptionKey inactive = MakeKey(ScopeA, isActive: false);
+
+        Func<Task> act = () => store.RotateAsync(inactive);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        (await store.GetActiveAsync(ScopeA)).Should().NotBeNull("the old key must remain active");
+    }
+
+    [Fact]
+    public async Task RotateAsync_NullKey_Throws()
+    {
+        InMemoryEncryptionKeyStore store = new();
+
+        Func<Task> act = () => store.RotateAsync(null!);
+
+        await act.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    [Fact]
+    public async Task Concurrent_RotateAsync_SingleActiveKeyAtEnd()
+    {
+        InMemoryEncryptionKeyStore store = new();
+        await store.CreateAsync(MakeKey(ScopeA));
+        const int parallelism = 10;
+
+        Task<EncryptionKey>[] tasks = Enumerable.Range(0, parallelism)
+            .Select(_ => Task.Run(() => store.RotateAsync(MakeKey(ScopeA))))
+            .ToArray();
+        EncryptionKey[] results = await Task.WhenAll(tasks);
+
+        IReadOnlyList<EncryptionKey> history = await store.GetHistoricalAsync(ScopeA);
+        EncryptionKey active = history.Where(k => k.IsActive).Should().ContainSingle().Subject;
+        results.Select(k => k.KeyId).Should().Contain(active.KeyId,
+            "the final active key must be one of the rotation candidates");
+    }
+
+    [Fact]
+    public async Task Concurrent_RotateAsync_WithCreate_InvariantHolds()
+    {
+        // Mixed create/rotate storm on the same scope: the one-active-key-per-scope invariant
+        // must hold whatever the interleaving.
+        InMemoryEncryptionKeyStore store = new();
+        const int pairs = 8;
+
+        Task[] tasks = Enumerable.Range(0, pairs)
+            .SelectMany(_ => new Task[]
+            {
+                Task.Run(() => store.CreateAsync(MakeKey(ScopeA))),
+                Task.Run(() => store.RotateAsync(MakeKey(ScopeA))),
+            })
+            .ToArray();
+        await Task.WhenAll(tasks);
+
+        IReadOnlyList<EncryptionKey> history = await store.GetHistoricalAsync(ScopeA);
+        history.Where(k => k.IsActive).Should().ContainSingle();
+    }
+
     // ---------- GetHistoricalAsync ----------
 
     [Fact]
@@ -407,6 +524,109 @@ public sealed class InMemoryEncryptionKeyStoreTests
 
         IReadOnlyList<string> activeScopes = await store.GetActiveScopesAsync();
         activeScopes.Should().HaveCount(scopeCount);
+    }
+
+    // ---------- UpdateWrappedKeyAsync (H2 — KEK rewrap persistence) ----------
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_UpdatesMaterialAndVersion()
+    {
+        InMemoryEncryptionKeyStore store = new();
+        EncryptionKey key = MakeKey(ScopeA);
+        await store.CreateAsync(key);
+
+        WrappedKey rewrapped = new("rewrapped-ciphertext", "v2");
+        EncryptionKey updated = await store.UpdateWrappedKeyAsync(key.KeyId, ScopeA, rewrapped);
+
+        updated.WrappedKey.Should().Be(rewrapped);
+
+        EncryptionKey? persisted = await store.GetByIdAsync(key.KeyId, ScopeA);
+        persisted!.WrappedKey.Ciphertext.Should().Be("rewrapped-ciphertext");
+        persisted.WrappedKey.ProviderVersion.Should().Be("v2");
+    }
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_PreservesIdentityAndLifecycleFields()
+    {
+        InMemoryEncryptionKeyStore store = new();
+        DateTimeOffset createdAt = new(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        EncryptionKey key = MakeKey(ScopeA, createdAt: createdAt);
+        await store.CreateAsync(key);
+
+        EncryptionKey updated = await store.UpdateWrappedKeyAsync(
+            key.KeyId,
+            ScopeA,
+            new WrappedKey("rewrapped-ciphertext", "v9"));
+
+        updated.KeyId.Should().Be(key.KeyId);
+        updated.Scope.Should().Be(ScopeA);
+        updated.CreatedAt.Should().Be(createdAt);
+        updated.ExpiresAt.Should().BeNull();
+        updated.IsActive.Should().BeTrue("rewrapping never changes a key's lifecycle state");
+    }
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_WorksOnHistoricalInactiveKey()
+    {
+        // A rewrap sweep must refresh HISTORICAL keys too — they are exactly the ones that
+        // still reference old KEK versions after a rotation.
+        InMemoryEncryptionKeyStore store = new();
+        EncryptionKey key = MakeKey(ScopeA);
+        await store.CreateAsync(key);
+        await store.DeactivateAllAsync(ScopeA);
+
+        EncryptionKey updated = await store.UpdateWrappedKeyAsync(
+            key.KeyId,
+            ScopeA,
+            new WrappedKey("rewrapped-ciphertext", "v2"));
+
+        updated.IsActive.Should().BeFalse("the key stays inactive — only the wrapping changed");
+        updated.WrappedKey.ProviderVersion.Should().Be("v2");
+    }
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_WrongScope_ThrowsAndDoesNotUpdate()
+    {
+        // M1 defence: a caller cannot overwrite another tenant's wrapped DEK by guessing a Guid.
+        InMemoryEncryptionKeyStore store = new();
+        EncryptionKey key = MakeKey(ScopeA);
+        await store.CreateAsync(key);
+
+        Func<Task> act = async () => await store.UpdateWrappedKeyAsync(
+            key.KeyId,
+            ScopeB,
+            new WrappedKey("attacker-ciphertext", "v2"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+
+        EncryptionKey? untouched = await store.GetByIdAsync(key.KeyId, ScopeA);
+        untouched!.WrappedKey.Should().Be(key.WrappedKey, "a scope mismatch must not modify the key");
+    }
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_UnknownKeyId_Throws()
+    {
+        InMemoryEncryptionKeyStore store = new();
+
+        Func<Task> act = async () => await store.UpdateWrappedKeyAsync(
+            Guid.NewGuid(),
+            ScopeA,
+            new WrappedKey("rewrapped-ciphertext", "v2"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>(
+            "a silent no-op would let a rewrap sweep report success while data still depends on the old KEK version");
+    }
+
+    [Fact]
+    public async Task UpdateWrappedKeyAsync_NullArguments_Throw()
+    {
+        InMemoryEncryptionKeyStore store = new();
+
+        Func<Task> nullScope = async () => await store.UpdateWrappedKeyAsync(Guid.NewGuid(), null!, new WrappedKey("x", "v1"));
+        Func<Task> nullWrapped = async () => await store.UpdateWrappedKeyAsync(Guid.NewGuid(), ScopeA, null!);
+
+        await nullScope.Should().ThrowAsync<ArgumentNullException>();
+        await nullWrapped.Should().ThrowAsync<ArgumentNullException>();
     }
 
     // ---------- Helpers ----------

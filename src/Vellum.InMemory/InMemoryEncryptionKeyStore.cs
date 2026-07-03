@@ -113,6 +113,12 @@ public sealed partial class InMemoryEncryptionKeyStore : IEncryptionKeyStore
         Message = "In-memory store: key {KeyId} was requested for scope {RequestedScope} but belongs to scope {ActualScope}")]
     private static partial void LogGetByIdMissScopeMismatch(ILogger logger, Guid keyId, string requestedScope, string actualScope);
 
+    [LoggerMessage(
+        EventId = 2003,
+        Level = LogLevel.Warning,
+        Message = "In-memory store: UpdateWrappedKeyAsync for key {KeyId} was requested for scope {RequestedScope} but the key belongs to scope {ActualScope} — failing closed")]
+    private static partial void LogUpdateWrappedKeyScopeMismatch(ILogger logger, Guid keyId, string requestedScope, string actualScope);
+
     /// <inheritdoc />
     public Task<EncryptionKey> CreateAsync(EncryptionKey key, CancellationToken cancellationToken = default)
     {
@@ -133,6 +139,40 @@ public sealed partial class InMemoryEncryptionKeyStore : IEncryptionKeyStore
             _keysById[key.KeyId] = key;
             return Task.FromResult(key);
         }
+    }
+
+    /// <inheritdoc />
+    public Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(newKey);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!newKey.IsActive)
+        {
+            throw new ArgumentException(
+                $"RotateAsync requires an active key (IsActive = true); installing an inactive key would leave scope '{newKey.Scope}' with zero active keys.",
+                nameof(newKey));
+        }
+
+        // Atomic swap under the global write lock: deactivate every active key for the scope and
+        // install the new active key in one critical section. In-memory mutations cannot fail
+        // half-way, so this call always wins — concurrent rotations simply serialise, each
+        // installing its key as the new active one.
+        lock (_writeLock)
+        {
+            foreach (KeyValuePair<Guid, EncryptionKey> entry in _keysById.ToArray())
+            {
+                EncryptionKey current = entry.Value;
+                if (current.IsActive && string.Equals(current.Scope, newKey.Scope, StringComparison.Ordinal))
+                {
+                    _keysById[entry.Key] = current with { IsActive = false };
+                }
+            }
+
+            _keysById[newKey.KeyId] = newKey;
+        }
+
+        return Task.FromResult(newKey);
     }
 
     /// <inheritdoc />
@@ -157,6 +197,44 @@ public sealed partial class InMemoryEncryptionKeyStore : IEncryptionKeyStore
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public Task<EncryptionKey> UpdateWrappedKeyAsync(
+        Guid keyId,
+        string scope,
+        WrappedKey newWrappedKey,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(newWrappedKey);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        lock (_writeLock)
+        {
+            if (!_keysById.TryGetValue(keyId, out EncryptionKey? existing))
+            {
+                // Fail closed: a silent no-op would let a rewrap sweep report success while
+                // data still depends on the old KEK version.
+                throw new InvalidOperationException(
+                    $"Encryption key {keyId} not found for scope '{scope}'; the wrapped key material was not updated.");
+            }
+
+            // Multi-tenant defense (M1): the caller must prove they know the scope the key
+            // belongs to. A mismatch fails closed and never reveals the other scope.
+            if (!string.Equals(existing.Scope, scope, StringComparison.Ordinal))
+            {
+                LogUpdateWrappedKeyScopeMismatch(_logger, keyId, scope, existing.Scope);
+                throw new InvalidOperationException(
+                    $"Encryption key {keyId} not found for scope '{scope}'; the wrapped key material was not updated.");
+            }
+
+            // Only the wrapped material changes — KeyId, Scope, CreatedAt, ExpiresAt, IsActive
+            // are immutable under a rewrap.
+            EncryptionKey updated = existing with { WrappedKey = newWrappedKey };
+            _keysById[keyId] = updated;
+            return Task.FromResult(updated);
+        }
     }
 
     /// <inheritdoc />

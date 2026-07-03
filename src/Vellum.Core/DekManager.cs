@@ -1,5 +1,5 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -7,8 +7,8 @@ namespace Vellum;
 
 /// <summary>
 /// Default <see cref="IDekManager"/> implementation: caches unwrapped Data Encryption Keys in
-/// <see cref="IMemoryCache"/>, coordinates <see cref="IKeyEncryptionProvider"/> and
-/// <see cref="IEncryptionKeyStore"/>, and handles race conditions on DEK creation.
+/// a Vellum-owned <see cref="VellumDekCache"/>, coordinates <see cref="IKeyEncryptionProvider"/>
+/// and <see cref="IEncryptionKeyStore"/>, and handles race conditions on DEK creation.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -23,12 +23,28 @@ namespace Vellum;
 /// corrupting the cache. See <c>tasks/lessons.md</c> L3.
 /// </para>
 /// <para>
+/// <b>Dedicated cache (M-C).</b> DEKs live in a Vellum-owned <see cref="VellumDekCache"/>, never
+/// in the application's shared <c>IMemoryCache</c>: arbitrary in-process code cannot read the
+/// plaintext entries, consumer SizeLimit budgeting cannot evict them, and every entry is zeroed
+/// on eviction. The <c>Cache*</c> helpers return whether the cache took ownership of the key
+/// bytes; when caching is disabled (<see cref="VellumOptions.DekCacheTtl"/> &lt;= 0) the caller
+/// zeroes its source array after cloning the returned copy (L-A).
+/// </para>
+/// <para>
 /// <b>Race-safe creation (L2).</b> <see cref="CreateDekAsync"/> applies a four-layer defense:
 /// (1) double-check via <see cref="IEncryptionKeyStore.GetActiveAsync"/> before attempting
 /// insertion, (2) delegate insertion to the store which handles unique-index conflicts and
 /// returns the winner, (3) detect whether we won the race by comparing key ids, and
 /// (4) on a post-wrap race loss, unwrap the winner's <see cref="WrappedKey"/> and cache that
 /// instead. The plaintext of the losing DEK is zeroed out.
+/// </para>
+/// <para>
+/// <b>Per-scope serialisation and fail-safe rotation.</b> All store/KEK-provider round-trips for a
+/// scope (cache-miss reads, creation, rotation) are serialised behind a per-scope async lock, and
+/// rotation wraps the new DEK <i>before</i> atomically swapping the active key via
+/// <see cref="IEncryptionKeyStore.RotateAsync"/>. A KEK-provider failure mid-rotation therefore
+/// leaves the old key active and the cache intact — the scope is never observed without an active
+/// DEK.
 /// </para>
 /// <para>
 /// <b>Multi-tenant defense.</b> Keys cached by <see cref="Guid"/> are partitioned by scope in the
@@ -39,7 +55,7 @@ namespace Vellum;
 public sealed partial class DekManager(
     IKeyEncryptionProvider keyProvider,
     IEncryptionKeyStore store,
-    IMemoryCache cache,
+    VellumDekCache cache,
     IRandomBytesProvider randomBytes,
     TimeProvider timeProvider,
     IOptions<VellumOptions> options,
@@ -49,18 +65,32 @@ public sealed partial class DekManager(
 
     private readonly IKeyEncryptionProvider _keyProvider = keyProvider ?? throw new ArgumentNullException(nameof(keyProvider));
     private readonly IEncryptionKeyStore _store = store ?? throw new ArgumentNullException(nameof(store));
-    private readonly IMemoryCache _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+    private readonly VellumDekCache _cache = cache ?? throw new ArgumentNullException(nameof(cache));
     private readonly IRandomBytesProvider _randomBytes = randomBytes ?? throw new ArgumentNullException(nameof(randomBytes));
     private readonly TimeProvider _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
     private readonly VellumOptions _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
     private readonly ILogger<DekManager> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+    // Per-scope async locks serialising every store/KEK-provider round-trip for a scope:
+    // GetActiveDekAsync's slow path, CreateDekAsync, and RotateDekAsync. This eliminates
+    // (a) the cache re-poisoning race where an in-flight slow read re-caches a freshly
+    // deactivated DEK after a rotation, (b) the KEK-provider stampede where N concurrent cache
+    // misses each round-trip to Vault/KMS, and (c) create-vs-rotate interleavings. The cache-hit
+    // fast path stays lock-free.
+    //
+    // The semaphores are intentionally never disposed: an undisposed SemaphoreSlim holds no OS
+    // handle unless AvailableWaitHandle is touched (it never is here), so the only cost is a few
+    // bytes of GC-managed memory per scope. Removing entries would race with a concurrent
+    // GetOrAdd handing out the same semaphore, and the scope population is bounded by the
+    // consumer's tenant count — a deliberate "grow-only" trade for correctness.
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _scopeLocks = new(StringComparer.Ordinal);
 
     /// <inheritdoc />
     public ValueTask<Dek> GetActiveDekAsync(string scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
 
-        if (_cache.TryGetValue(BuildActiveCacheKey(scope), out Dek? cached) && cached is not null)
+        if (_cache.TryGetValue(BuildActiveCacheKey(scope), out Dek? cached))
         {
             LogDekCacheHit(_logger, scope);
             return new ValueTask<Dek>(CloneDek(cached));
@@ -74,6 +104,25 @@ public sealed partial class DekManager(
     {
         ArgumentNullException.ThrowIfNull(scope);
 
+        SemaphoreSlim scopeLock = GetScopeLock(scope);
+        await scopeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await CreateDekCoreAsync(scope, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _ = scopeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Creation body shared by <see cref="CreateDekAsync"/> and <see cref="GetActiveDekSlowAsync"/>.
+    /// Callers MUST hold the per-scope lock — <see cref="SemaphoreSlim"/> is not reentrant, so the
+    /// locked entry points cannot call each other directly.
+    /// </summary>
+    private async Task<Dek> CreateDekCoreAsync(string scope, CancellationToken cancellationToken)
+    {
         // Layer 1 of L2 four-layer race defense: double-check before generating.
         EncryptionKey? winner = await _store.GetActiveAsync(scope, cancellationToken).ConfigureAwait(false);
         if (winner is not null)
@@ -132,23 +181,114 @@ public sealed partial class DekManager(
             CryptographicOperations.ZeroMemory(newDekBytes);
             LogDekRaceConditionHandled(_logger, scope);
             byte[] winnerBytes = await _keyProvider.UnwrapAsync(persisted.WrappedKey, cancellationToken).ConfigureAwait(false);
+            // H-1 symmetry (A4): the race-loss winner is an unwrap path like any other and must
+            // honour the AES-256 length contract. EnsureDekLength zeroes the bytes and throws on
+            // mismatch.
+            EnsureDekLength(winnerBytes);
             active = new Dek(winnerBytes, persisted.KeyId, persisted.WrappedKey);
         }
 
-        CacheActiveDek(scope, active);
-        return CloneDek(active);
+        // Clone BEFORE the ownership handoff below: when caching is disabled the source array
+        // is zeroed, and the returned Dek must carry an independent copy (L3).
+        Dek result = CloneDek(active);
+        if (!CacheActiveDek(scope, active))
+        {
+            // L-A: caching disabled — nothing else references active.Key (`result` holds a
+            // clone), so scrub the plaintext instead of abandoning it on the managed heap.
+            CryptographicOperations.ZeroMemory(active.Key);
+        }
+
+        return result;
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// <b>Fail-safe ordering (A2).</b> The new DEK is generated and wrapped via the KEK provider
+    /// BEFORE anything is mutated: if the provider fails, the method throws with the store
+    /// untouched (the old key stays active) and the cache still valid — encrypts keep working on
+    /// the old key. Only after a successful wrap does the store atomically swap the active key via
+    /// <see cref="IEncryptionKeyStore.RotateAsync"/>, after which the cache entry is replaced
+    /// (never removed first) so there is no window in which readers observe a missing entry.
+    /// </remarks>
     public async Task RotateDekAsync(string scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
 
-        await _store.DeactivateAllAsync(scope, cancellationToken).ConfigureAwait(false);
-        _cache.Remove(BuildActiveCacheKey(scope));
+        SemaphoreSlim scopeLock = GetScopeLock(scope);
+        await scopeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            byte[] newDekBytes = new byte[DekSizeBytes];
+            _randomBytes.Fill(newDekBytes);
+            EnsureDekLength(newDekBytes);
 
-        _ = await CreateDekAsync(scope, cancellationToken).ConfigureAwait(false);
-        LogDekRotated(_logger, scope);
+            WrappedKey wrappedDek;
+            try
+            {
+                wrappedDek = await _keyProvider.WrapAsync(newDekBytes, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                CryptographicOperations.ZeroMemory(newDekBytes);
+                throw;
+            }
+
+            DateTimeOffset now = _timeProvider.GetUtcNow();
+            EncryptionKey candidate = new(
+                KeyId: Guid.NewGuid(),
+                Scope: scope,
+                WrappedKey: wrappedDek,
+                CreatedAt: now,
+                ExpiresAt: null,
+                IsActive: true);
+
+            EncryptionKey persisted;
+            try
+            {
+                // Atomic swap: deactivate-old + insert-new in one store transaction. On failure
+                // the store guarantees the old key is still active — and because we have not
+                // touched the cache yet, the cached old DEK keeps serving encrypts.
+                persisted = await _store.RotateAsync(candidate, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                CryptographicOperations.ZeroMemory(newDekBytes);
+                throw;
+            }
+
+            Dek active;
+            if (persisted.KeyId == candidate.KeyId)
+            {
+                // We won: cache our freshly generated plaintext, no unwrap round-trip needed.
+                active = new Dek(newDekBytes, persisted.KeyId, persisted.WrappedKey);
+            }
+            else
+            {
+                // A concurrent rotation won. Zero our losing plaintext and unwrap the winner.
+                CryptographicOperations.ZeroMemory(newDekBytes);
+                LogDekRaceConditionHandled(_logger, scope);
+                byte[] winnerBytes = await _keyProvider.UnwrapAsync(persisted.WrappedKey, cancellationToken).ConfigureAwait(false);
+                EnsureDekLength(winnerBytes);
+                active = new Dek(winnerBytes, persisted.KeyId, persisted.WrappedKey);
+            }
+
+            // Replace (never Remove-then-repopulate) the active cache entry: _cache.Set swaps the
+            // entry in place so readers either see the old DEK or the new one — never a miss.
+            // The replaced entry's eviction callback zeroes the OLD array; the by-id entry for
+            // the old key holds its own clone and keeps serving historical decrypts (L-4).
+            if (!CacheActiveDek(scope, active))
+            {
+                // L-A: caching disabled — RotateDekAsync returns nothing, so no caller
+                // references active.Key; scrub the plaintext instead of abandoning it.
+                CryptographicOperations.ZeroMemory(active.Key);
+            }
+
+            LogDekRotated(_logger, scope);
+        }
+        finally
+        {
+            _ = scopeLock.Release();
+        }
     }
 
     /// <inheritdoc />
@@ -157,7 +297,7 @@ public sealed partial class DekManager(
         ArgumentNullException.ThrowIfNull(wrappedKey);
 
         string cacheKey = BuildWrappedCacheKey(wrappedKey);
-        if (_cache.TryGetValue(cacheKey, out Dek? cached) && cached is not null)
+        if (_cache.TryGetValue(cacheKey, out Dek? cached))
         {
             LogDekWrappedCacheHit(_logger);
             return new ValueTask<Dek>(CloneDek(cached));
@@ -172,7 +312,7 @@ public sealed partial class DekManager(
         ArgumentNullException.ThrowIfNull(scope);
 
         string cacheKey = BuildKeyIdCacheKey(keyId, scope);
-        if (_cache.TryGetValue(cacheKey, out Dek? cached) && cached is not null)
+        if (_cache.TryGetValue(cacheKey, out Dek? cached))
         {
             // L-3: belt-and-braces re-verification on the fast path. The cache key is already
             // scope-partitioned (see L15) AND includes the keyId, so a mismatch here should
@@ -193,16 +333,39 @@ public sealed partial class DekManager(
 
     private async Task<Dek> GetActiveDekSlowAsync(string scope, CancellationToken cancellationToken)
     {
-        EncryptionKey? active = await _store.GetActiveAsync(scope, cancellationToken).ConfigureAwait(false);
-
-        if (active is null)
+        SemaphoreSlim scopeLock = GetScopeLock(scope);
+        await scopeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            LogNoDekFound(_logger, scope);
-            return await CreateDekAsync(scope, cancellationToken).ConfigureAwait(false);
-        }
+            // Anti-stampede double-check: N concurrent cache misses all queue on the scope lock;
+            // the first one populates the cache, the other N-1 are answered right here without a
+            // store or KEK-provider round-trip. This also closes the re-poisoning race: a slow
+            // read can no longer interleave with RotateDekAsync and re-cache a deactivated DEK,
+            // because rotation holds the same lock.
+            if (_cache.TryGetValue(BuildActiveCacheKey(scope), out Dek? cached))
+            {
+                LogDekCacheHit(_logger, scope);
+                return CloneDek(cached);
+            }
 
-        return await LoadAndCacheAsync(active, cancellationToken).ConfigureAwait(false);
+            EncryptionKey? active = await _store.GetActiveAsync(scope, cancellationToken).ConfigureAwait(false);
+
+            if (active is null)
+            {
+                LogNoDekFound(_logger, scope);
+                return await CreateDekCoreAsync(scope, cancellationToken).ConfigureAwait(false);
+            }
+
+            return await LoadAndCacheAsync(active, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _ = scopeLock.Release();
+        }
     }
+
+    private SemaphoreSlim GetScopeLock(string scope) =>
+        _scopeLocks.GetOrAdd(scope, static _ => new SemaphoreSlim(1, 1));
 
     private async Task<Dek> GetDekByWrappedKeySlowAsync(
         WrappedKey wrappedKey,
@@ -223,9 +386,17 @@ public sealed partial class DekManager(
         // off EncryptedPayload directly.
         Dek dek = new(dekBytes, Guid.Empty, wrappedKey);
 
-        CacheByWrappedKey(cacheKey, dek);
+        // Clone BEFORE the ownership handoff: when caching is disabled the source array is
+        // zeroed, and the returned Dek must carry an independent copy (L3).
+        Dek result = CloneDek(dek);
+        if (!CacheByWrappedKey(cacheKey, dek))
+        {
+            // L-A: caching disabled — `result` holds a clone, so scrub the unwrapped source.
+            CryptographicOperations.ZeroMemory(dekBytes);
+        }
+
         LogDekWrappedLoadedAndCached(_logger);
-        return CloneDek(dek);
+        return result;
     }
 
     private async Task<Dek> GetDekByKeyIdSlowAsync(Guid keyId, string scope, CancellationToken cancellationToken)
@@ -253,9 +424,17 @@ public sealed partial class DekManager(
         EnsureDekLength(dekBytes);
         Dek dek = new(dekBytes, persisted.KeyId, persisted.WrappedKey);
 
-        CacheByKeyId(scope, dek);
+        // Clone BEFORE the ownership handoff: when caching is disabled the source array is
+        // zeroed, and the returned Dek must carry an independent copy (L3).
+        Dek result = CloneDek(dek);
+        if (!CacheByKeyId(scope, dek))
+        {
+            // L-A: caching disabled — `result` holds a clone, so scrub the unwrapped source.
+            CryptographicOperations.ZeroMemory(dekBytes);
+        }
+
         LogDekLoadedFromStore(_logger, scope);
-        return CloneDek(dek);
+        return result;
     }
 
     private async Task<Dek> LoadAndCacheAsync(EncryptionKey persisted, CancellationToken cancellationToken)
@@ -264,9 +443,17 @@ public sealed partial class DekManager(
         EnsureDekLength(dekBytes);
         Dek dek = new(dekBytes, persisted.KeyId, persisted.WrappedKey);
 
-        CacheActiveDek(persisted.Scope, dek);
+        // Clone BEFORE the ownership handoff: when caching is disabled the source array is
+        // zeroed, and the returned Dek must carry an independent copy (L3).
+        Dek result = CloneDek(dek);
+        if (!CacheActiveDek(persisted.Scope, dek))
+        {
+            // L-A: caching disabled — `result` holds a clone, so scrub the unwrapped source.
+            CryptographicOperations.ZeroMemory(dekBytes);
+        }
+
         LogDekLoadedFromStore(_logger, persisted.Scope);
-        return CloneDek(dek);
+        return result;
     }
 
     /// <summary>
@@ -286,50 +473,60 @@ public sealed partial class DekManager(
         }
     }
 
-    private void CacheActiveDek(string scope, Dek dek)
+    /// <summary>
+    /// Caches <paramref name="dek"/> under the active-scope key and (a clone of it) under the
+    /// by-id key. Returns whether the cache took ownership of <paramref name="dek"/>'s key
+    /// bytes: when it returns <see langword="false"/> (caching disabled via
+    /// <see cref="VellumOptions.DekCacheTtl"/>), the caller still owns <see cref="Dek.Key"/>
+    /// and must zero it after cloning whatever it returns (L-A).
+    /// </summary>
+    private bool CacheActiveDek(string scope, Dek dek)
     {
         if (_options.DekCacheTtl <= TimeSpan.Zero)
         {
-            return;
+            return false;
         }
 
-        MemoryCacheEntryOptions entryOptions = new()
-        {
-            AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
-            Size = 1, // L25: required when consumer configures IMemoryCache with SizeLimit
-        };
-        _cache.Set(BuildActiveCacheKey(scope), dek, entryOptions);
-        _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), dek, entryOptions);
+        // The two entries must NEVER share the same byte[]: each entry's eviction callback
+        // (installed by VellumDekCache.Set) zeroes its own array, and the active entry is
+        // replaced (= evicted) on every rotation while the by-id entry must keep serving
+        // historical decrypts (L-4). A shared array would be scrubbed out from under the
+        // by-id entry on the first rotation.
+        _cache.Set(BuildActiveCacheKey(scope), dek, _options.DekCacheTtl);
+        _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), CloneDek(dek), _options.DekCacheTtl);
+        return true;
     }
 
-    private void CacheByWrappedKey(string cacheKey, Dek dek)
+    /// <summary>
+    /// Caches <paramref name="dek"/> under the wrapped-ciphertext-hash key, transferring
+    /// ownership of its key bytes to the cache. Returns <see langword="false"/> when caching
+    /// is disabled — the caller then still owns <see cref="Dek.Key"/> and must zero it (L-A).
+    /// </summary>
+    private bool CacheByWrappedKey(string cacheKey, Dek dek)
     {
         if (_options.DekCacheTtl <= TimeSpan.Zero)
         {
-            return;
+            return false;
         }
 
-        MemoryCacheEntryOptions entryOptions = new()
-        {
-            AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
-            Size = 1, // L25: required when consumer configures IMemoryCache with SizeLimit
-        };
-        _cache.Set(cacheKey, dek, entryOptions);
+        _cache.Set(cacheKey, dek, _options.DekCacheTtl);
+        return true;
     }
 
-    private void CacheByKeyId(string scope, Dek dek)
+    /// <summary>
+    /// Caches <paramref name="dek"/> under the scope-partitioned by-id key (L15), transferring
+    /// ownership of its key bytes to the cache. Returns <see langword="false"/> when caching
+    /// is disabled — the caller then still owns <see cref="Dek.Key"/> and must zero it (L-A).
+    /// </summary>
+    private bool CacheByKeyId(string scope, Dek dek)
     {
         if (_options.DekCacheTtl <= TimeSpan.Zero)
         {
-            return;
+            return false;
         }
 
-        MemoryCacheEntryOptions entryOptions = new()
-        {
-            AbsoluteExpirationRelativeToNow = _options.DekCacheTtl,
-            Size = 1, // L25: required when consumer configures IMemoryCache with SizeLimit
-        };
-        _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), dek, entryOptions);
+        _cache.Set(BuildKeyIdCacheKey(dek.KeyId, scope), dek, _options.DekCacheTtl);
+        return true;
     }
 
     private static Dek CloneDek(Dek source) =>

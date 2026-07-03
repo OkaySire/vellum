@@ -43,5 +43,5 @@ Console.WriteLine($"Nonce bytes:      {envelope.Nonce.Length}");
 Console.WriteLine($"Wrapped provider: {envelope.WrappedDek.ProviderVersion}");
 Console.WriteLine();
 
-string roundtrip = await encryptor.DecryptStringAsync(envelope);
+string roundtrip = await encryptor.DecryptStringAsync(envelope, scope: "tenant:demo");
 Console.WriteLine($"Decrypted:        \"{roundtrip}\"");

@@ -9,10 +9,10 @@ management, key rotation, and multi-tenant support. It does not implement any cr
 primitive of its own — all authenticated encryption goes through
 `System.Security.Cryptography.AesGcm`.
 
-> **Status: `0.1.0`.** First stable drop. Pre-1.0: API may evolve in 0.2.0+, breaking changes
-> allowed per semver. Cloud KMS providers (Azure Key Vault, AWS KMS, GCP KMS) land in `0.3.0`.
-> A background rotation worker (`Vellum.Rotation`) and ASP.NET Core health checks
-> (`Vellum.AspNetCore`) land in `0.4.0`. See the
+> **Status: `0.2.0`.** Pre-1.0: API may evolve, breaking changes allowed per semver — see
+> the [CHANGELOG](https://github.com/OkaySire/vellum/blob/main/CHANGELOG.md) for the 0.2.0
+> breaking changes. Cloud KMS providers (Azure Key Vault, AWS KMS, GCP KMS) land in `0.3.0`;
+> ASP.NET Core health checks (`Vellum.AspNetCore`) are planned. See the
 > [roadmap in the top-level README](https://github.com/OkaySire/vellum#packages) for the
 > exact package list.
 
@@ -24,6 +24,7 @@ primitive of its own — all authenticated encryption goes through
 | Understand how the pieces fit together | [Architecture](architecture.md) |
 | Get a short answer to a specific question | [FAQ](faq.md) |
 | Pick between Vellum and another library | [Comparison](comparison.md) |
+| Rotate DEKs and KEKs safely (including `min_decryption_version`) | [Key rotation runbook](kek-rotation.md) |
 | Port my existing custom encryption layer to Vellum | [Migrating from a custom implementation](migrations/from-custom.md) |
 | Bridge `appsettings.json` values into Vellum's `Action<TOptions>` overloads | [Consumer options bridging](consumer-options-bridging.md) |
 | Look up a specific interface / record / method | [API reference](api/) |
@@ -41,8 +42,8 @@ primitive of its own — all authenticated encryption goes through
 | `Vellum.AzureKeyVault` | Azure Key Vault KEK provider. | Planned (0.3.0) |
 | `Vellum.AwsKms` | AWS KMS KEK provider. | Planned (0.3.0) |
 | `Vellum.GcpKms` | GCP KMS KEK provider. | Planned (0.3.0) |
-| `Vellum.Rotation` | Opt-in background DEK rotation. | Planned (0.4.0) |
-| `Vellum.AspNetCore` | Health checks and DI helpers. | Planned (0.4.0) |
+| `Vellum.Rotation` | Opt-in background DEK rotation hosted service. | Shipped |
+| `Vellum.AspNetCore` | Health checks and DI helpers. | Planned |
 
 ## Design principles
 

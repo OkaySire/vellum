@@ -17,14 +17,32 @@ public sealed class FakeEncryptionKeyStore : IEncryptionKeyStore
 
     public int DeactivateCalls { get; private set; }
 
-    public Task<EncryptionKey?> GetActiveAsync(string scope, CancellationToken cancellationToken = default)
+    public int RotateCalls { get; private set; }
+
+    public int UpdateWrappedKeyCalls { get; private set; }
+
+    /// <summary>
+    /// Test hook: when set, awaited at the start of <see cref="GetActiveAsync"/> (before the
+    /// store is consulted). Lets tests pause an in-flight slow read at a precise point to
+    /// orchestrate read-vs-rotate interleavings deterministically.
+    /// </summary>
+    public Func<string, Task>? GetActiveDelay { get; set; }
+
+    public async Task<EncryptionKey?> GetActiveAsync(string scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
+
+        Func<string, Task>? delay = GetActiveDelay;
+        if (delay is not null)
+        {
+            await delay(scope).ConfigureAwait(false);
+        }
+
         lock (_lock)
         {
             EncryptionKey? active = _byId.Values
                 .FirstOrDefault(k => k.IsActive && string.Equals(k.Scope, scope, StringComparison.Ordinal));
-            return Task.FromResult<EncryptionKey?>(active);
+            return active;
         }
     }
 
@@ -63,6 +81,35 @@ public sealed class FakeEncryptionKeyStore : IEncryptionKeyStore
         }
     }
 
+    public Task<EncryptionKey> RotateAsync(EncryptionKey newKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(newKey);
+        if (!newKey.IsActive)
+        {
+            throw new ArgumentException(
+                "RotateAsync requires an active key (IsActive = true).",
+                nameof(newKey));
+        }
+
+        RotateCalls++;
+        lock (_lock)
+        {
+            // Atomic swap under the lock: deactivate all active keys for the scope, then
+            // install the new active key — mirroring the transactional semantics of the
+            // production EF Core store.
+            KeyValuePair<Guid, EncryptionKey>[] targets = _byId
+                .Where(entry => string.Equals(entry.Value.Scope, newKey.Scope, StringComparison.Ordinal) && entry.Value.IsActive)
+                .ToArray();
+            foreach (KeyValuePair<Guid, EncryptionKey> entry in targets)
+            {
+                _byId[entry.Key] = entry.Value with { IsActive = false };
+            }
+
+            _byId[newKey.KeyId] = newKey;
+            return Task.FromResult(newKey);
+        }
+    }
+
     public Task DeactivateAllAsync(string scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -79,6 +126,27 @@ public sealed class FakeEncryptionKeyStore : IEncryptionKeyStore
         }
 
         return Task.CompletedTask;
+    }
+
+    public Task<EncryptionKey> UpdateWrappedKeyAsync(Guid keyId, string scope, WrappedKey newWrappedKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(newWrappedKey);
+        UpdateWrappedKeyCalls++;
+
+        lock (_lock)
+        {
+            if (!_byId.TryGetValue(keyId, out EncryptionKey? existing)
+                || !string.Equals(existing.Scope, scope, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Encryption key {keyId} not found for scope '{scope}'; the wrapped key material was not updated.");
+            }
+
+            EncryptionKey updated = existing with { WrappedKey = newWrappedKey };
+            _byId[keyId] = updated;
+            return Task.FromResult(updated);
+        }
     }
 
     public Task<IReadOnlyList<EncryptionKey>> GetHistoricalAsync(string scope, CancellationToken cancellationToken = default)
