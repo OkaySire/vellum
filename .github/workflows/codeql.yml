@@ -68,7 +68,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Install the single SDK pinned in global.json. CodeQL builds once; we do
       # NOT need the net8/net9 runtimes here.
