@@ -73,7 +73,7 @@ jobs:
       # Install the single SDK pinned in global.json. CodeQL builds once; we do
       # NOT need the net8/net9 runtimes here.
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
