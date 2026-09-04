@@ -51,7 +51,6 @@ $RECYCLE.BIN/
 .jacq/
 
 # Agent-internal files (not shipped to public repo)
-CLAUDE.md
 tasks/
 
 # DocFX build output
