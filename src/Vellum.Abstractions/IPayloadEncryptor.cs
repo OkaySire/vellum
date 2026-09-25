@@ -34,7 +34,18 @@ namespace Vellum;
 /// <see cref="PayloadEncryptorExtensions"/> when your plaintext is UTF-8 text.
 /// </para>
 /// <para>
+/// <b>DEK resolution at decrypt time (0.4.0).</b> <see cref="DecryptAsync"/> resolves the DEK from
+/// <see cref="IEncryptionKeyStore"/> by <see cref="EncryptedPayload.KeyId"/> first, and falls back
+/// to the <see cref="EncryptedPayload.WrappedDek"/> copy carried by the envelope when the store
+/// cannot serve the key, or serves a record that then fails to unwrap or fails the authentication
+/// tag check. The order matters operationally: rewrapping a DEK against a different KEK (a new
+/// Vault Transit mount, a new KMS key) then only has to update the store's one record per key,
+/// instead of rewriting every persisted envelope. The fallback guarantees the reordering can only
+/// turn a failure into a success — anything that decrypted before still reaches the envelope copy.
+/// </para>
+/// <para>
 /// <b>Fail closed.</b> Any error must throw. Implementations never return the plaintext unencrypted.
+/// When both resolution paths fail, the raised error names both attempts.
 /// </para>
 /// </remarks>
 public interface IPayloadEncryptor
@@ -82,7 +93,26 @@ public interface IPayloadEncryptor
     /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The original plaintext bytes. Callers own this array and should zero it out if it contains sensitive data.</returns>
-    /// <exception cref="System.Security.Cryptography.CryptographicException">Thrown when the envelope format version is unsupported, when <paramref name="scope"/> is missing for a format version 2 envelope, or when the ciphertext is corrupted, tampered with, bound to a different scope, or does not match the authentication tag.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>Depends on the key store since 0.4.0.</b> The DEK is looked up in
+    /// <see cref="IEncryptionKeyStore"/> by <see cref="EncryptedPayload.KeyId"/> before the
+    /// envelope's own <see cref="EncryptedPayload.WrappedDek"/> copy is considered. For a caller
+    /// that has just read the ciphertext out of that same store's database this costs nothing. For
+    /// a caller decrypting a portable envelope with <i>no</i> store reachable it is not free: the
+    /// lookup is attempted, fails, and the decrypt then succeeds off the envelope copy — one wasted
+    /// round-trip, and two KEK calls for that decrypt instead of one. The store is skipped
+    /// altogether when the envelope carries no usable lookup pair (an empty
+    /// <see cref="EncryptedPayload.KeyId"/>, or an empty <paramref name="scope"/>, which is legal
+    /// for format version 1 envelopes).
+    /// </para>
+    /// <para>
+    /// Because the fallback also absorbs a store-side scope mismatch, the lookup adds no
+    /// cross-tenant control: scope separation is enforced cryptographically by the format version 2
+    /// associated data, not by this lookup.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="System.Security.Cryptography.CryptographicException">Thrown when the envelope format version is unsupported, when <paramref name="scope"/> is missing for a format version 2 envelope, when the ciphertext is corrupted, tampered with, bound to a different scope, or does not match the authentication tag, or when both DEK resolution paths failed — in which case the message names both attempts and the inner <see cref="System.AggregateException"/> carries both causes.</exception>
     /// <exception cref="System.InvalidOperationException">Thrown when <see cref="IsEnabled"/> is <see langword="false"/> or the wrapped DEK cannot be unwrapped.</exception>
     /// <exception cref="System.OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is cancelled.</exception>
     public Task<byte[]> DecryptAsync(EncryptedPayload payload, string scope, CancellationToken cancellationToken = default);

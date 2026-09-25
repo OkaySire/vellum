@@ -7,6 +7,7 @@ using Xunit;
 
 namespace Vellum.Tests;
 
+[Collection("PayloadDecryptMetrics")]
 public sealed class VellumServiceCollectionExtensionsTests
 {
     [Fact]

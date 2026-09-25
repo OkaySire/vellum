@@ -14,21 +14,27 @@ namespace Vellum;
 /// </para>
 /// <para>
 /// <b>Self-contained.</b> The envelope carries the wrapped DEK (<see cref="WrappedDek"/>) embedded
-/// directly. Decryption requires <i>only</i> the configured <see cref="IKeyEncryptionProvider"/>
-/// plus the fields of this record — it does <b>not</b> require a round-trip to
-/// <see cref="IEncryptionKeyStore"/>. This matches the design of the AWS Encryption SDK and
-/// Google Tink: a consumer that persists an envelope stores it complete in a single row and
-/// decrypts without any database lookup.
+/// directly, so the fields of this record plus the configured <see cref="IKeyEncryptionProvider"/>
+/// are <i>sufficient</i> to decrypt it. This matches the design of the AWS Encryption SDK and
+/// Google Tink: a consumer that persists an envelope stores it complete in a single row.
 /// </para>
 /// <para>
 /// <b>Portability.</b> Because the envelope is self-contained, it can be moved between systems
 /// (for example, sent by email or copied across environments) and decrypted anywhere the same
-/// KEK provider is configured.
+/// KEK provider is configured. Since 0.4.0 the default decrypt path <i>prefers</i>
+/// <see cref="IEncryptionKeyStore"/> and only falls back to <see cref="WrappedDek"/>, so a
+/// portable envelope decrypted with no store reachable pays one failed store lookup first — it
+/// still decrypts, but the round-trip is not free. See
+/// <see cref="IPayloadEncryptor.DecryptAsync"/>.
 /// </para>
 /// <para>
-/// <b>Audit only.</b> <see cref="KeyId"/> is retained for audit and rotation tracking (so you
-/// can answer "which DEK was used to encrypt this payload?") but is <b>not</b> required for
-/// decryption. The <see cref="WrappedDek"/> is the sole source of truth at decrypt time.
+/// <b>Not audit-only since 0.4.0.</b> <see cref="KeyId"/> used to be retained for audit and
+/// rotation tracking alone. It is now also the <i>primary</i> DEK lookup key at decrypt time: the
+/// default decrypt resolves the DEK from <see cref="IEncryptionKeyStore"/> by this identifier and
+/// treats <see cref="WrappedDek"/> as the fallback. A consumer that persists envelopes
+/// field-by-field must therefore persist <see cref="KeyId"/> faithfully, not as a nullable
+/// convenience column. An envelope carrying <see cref="System.Guid.Empty"/> is still decryptable —
+/// there is simply nothing to look up, so it goes straight to <see cref="WrappedDek"/>.
 /// </para>
 /// <para>
 /// <b>Value equality.</b> This record overrides <see cref="Equals(EncryptedPayload)"/> and

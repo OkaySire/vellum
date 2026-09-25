@@ -469,8 +469,8 @@ for the failure semantics.
 ### 4.3 Decrypt a historical envelope
 
 If you have stored envelopes from before a rotation, nothing changes — `DecryptStringAsync`
-reads the embedded `WrappedDek` from the envelope and unwraps it through the KEK provider.
-No store round-trip, no version matching:
+resolves the DEK by the envelope's `KeyId` through the key store, and falls back to the
+embedded `WrappedDek` when the store cannot serve it. No version matching either way:
 
 ```csharp
 // Stored ciphertext + nonce + wrapped-DEK blob + format version somewhere:

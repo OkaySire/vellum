@@ -124,7 +124,7 @@ trail", here is how each library handles the envelope format:
 
 | Library | Envelope format | Self-contained? | KeyId required at decrypt? |
 |---|---|---|---|
-| Vellum | `EncryptedPayload(ciphertext, nonce, wrappedDek, keyId, formatVersion)` — `wrappedDek` is the single source of truth at decrypt time; format version 2 (default) binds the scope as AES-GCM AAD | **Yes** — no store round-trip on decrypt | No, audit only |
+| Vellum | `EncryptedPayload(ciphertext, nonce, wrappedDek, keyId, formatVersion)` — since 0.4.0 `keyId` is resolved against the key store first and `wrappedDek` is the fallback; format version 2 (default) binds the scope as AES-GCM AAD | **Yes** — the envelope's own fields always suffice, via the fallback | Yes, `keyId` is the primary DEK lookup key since 0.4.0 |
 | AWS Encryption SDK | Fixed on-wire format (`.html#message-format`) combining ciphertext + encrypted data keys + algorithm suite id | **Yes** — but the format is opinionated and AWS-specific | No (encrypted data keys carry the material) |
 | Google Tink | Keyset reference + primitive-specific ciphertext; the keyset lives separately | No — decrypt requires access to the matching keyset | No (keyset id determines the primitive) |
 | `DataProtection` | Purpose-stringed ciphertext; key ring managed by the framework | No — decrypt requires the matching key ring | No (key ring id is encoded in the output) |

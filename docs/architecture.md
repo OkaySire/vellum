@@ -30,15 +30,26 @@ flowchart LR
     WD --> ENV
     N[Nonce 12 bytes] --> AES
     N --> ENV
-    KID[KeyId audit only] --> ENV
+    KID[KeyId - DEK lookup key] --> ENV
 ```
 
-Everything highlighted as `ENV` — ciphertext, nonce, wrapped DEK, audit KeyId, plus a
+Everything highlighted as `ENV` — ciphertext, nonce, wrapped DEK, KeyId, plus a
 `FormatVersion` field — goes into a single self-contained
 [`EncryptedPayload`](../src/Vellum.Abstractions/EncryptedPayload.cs)
-record. A consumer that persists an envelope stores it complete in a single row and
-decrypts without any database lookup. This matches the design of the AWS Encryption SDK and
-Google Tink.
+record. A consumer that persists an envelope stores it complete in a single row, and the
+record's own fields are sufficient to decrypt it. This matches the design of the AWS
+Encryption SDK and Google Tink.
+
+Since **0.4.0** the default decrypt does not stop there: it looks the DEK up in
+`IEncryptionKeyStore` by `KeyId` **first** and treats the envelope's embedded `WrappedDek` as
+the **fallback** — used when the store cannot serve the key, or serves a record that then
+fails to unwrap or fails the authentication tag check. That order is what makes re-encrypting
+every DEK against a new KEK (a Transit mount split, a new KMS key) a matter of updating one
+store record per DEK instead of rewriting every persisted row. The cost is that decryption
+now normally touches the store: free for a backend that just read the ciphertext out of the
+same database, one wasted round-trip for a consumer decrypting a portable envelope with no
+store reachable (it still succeeds, via the fallback). See `VellumDecryptMetrics` for the
+gauges that make the fallback visible.
 
 By default the AES-GCM call also **binds the ciphertext to its scope** via associated data
 (`UTF8("vellum:aad:v2:scope:" + scope)` — envelope format version 2). Decryption
@@ -49,10 +60,13 @@ the legacy unbound format version 1 when the scope is genuinely unavailable at d
 time.
 
 The classical alternative is to store only the `KeyId` alongside the ciphertext and look up
-the wrapped DEK in a side table on every decrypt. Vellum also supports that pattern (through
-`IDekManager.GetDekByKeyIdAsync`), but `EncryptedPayload.KeyId` is **audit-only** when you
-use the envelope path — the actual decrypt reads `WrappedDek` off the envelope. The `KeyId`
-is kept for audit trails, rotation tracking, and the `"which DEK encrypted this row?"` query.
+the wrapped DEK in a side table on every decrypt. Since **0.4.0** Vellum does both, in that
+order: the decrypt takes the side-table path first (`IDekManager.GetDekByKeyIdAsync`) and the
+envelope path as its fallback. So `EncryptedPayload.KeyId` is no longer audit-only — it is the
+primary DEK lookup key, on top of still serving audit trails, rotation tracking and the
+`"which DEK encrypted this row?"` query. Consumers persisting envelopes field-by-field must
+persist it faithfully; an envelope carrying `Guid.Empty` still decrypts, straight through the
+fallback.
 
 ## The Vellum stack
 
