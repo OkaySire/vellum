@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using FluentAssertions;
+using FluentAssertions.Specialized;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Vellum.Tests.Fakes;
@@ -187,18 +188,47 @@ public sealed class PayloadEncryptorTests
     }
 
     [Fact]
-    public async Task Decrypt_SelfContained_UsesOwnEnvelopeNotStoreLookup()
+    public async Task Decrypt_SelfContained_SucceedsWithAStoreThatCannotServeTheKey()
     {
-        // Envelopes carry their own WrappedKey, so decryption goes through the
-        // IKeyEncryptionProvider via IDekManager.GetDekByWrappedKeyAsync — never back to
-        // IEncryptionKeyStore. This pins the self-contained envelope contract (C3).
-        (PayloadEncryptor encryptor, _, _) = BuildSut();
-
+        // The self-contained envelope contract (C3), restated for 0.4.0. C3 guarantees that an
+        // envelope carries everything needed to decrypt it; it does NOT say the store is left alone
+        // — since 0.4.0 decrypt asks IEncryptionKeyStore by KeyId FIRST and only then reads the
+        // envelope's own WrappedKey. So the guarantee is tested the only way it still can be: the
+        // reader is handed a store that has never heard of this KeyId, and the decrypt must still
+        // succeed off the envelope copy.
+        //
+        // (Until this rename the test was Decrypt_SelfContained_UsesOwnEnvelopeNotStoreLookup and
+        // claimed "never back to IEncryptionKeyStore" — the opposite of the 0.4.0 order. It passed
+        // only because the single store present happened to serve the key, i.e. through the path it
+        // asserted was not taken.)
+        FakeKeyEncryptionProvider provider = new();
+        FakeEncryptionKeyStore writeStore = new();
         byte[] plaintext = Encoding.UTF8.GetBytes("self contained");
-        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
 
-        byte[] decrypted = await encryptor.DecryptAsync(envelope, Scope);
+        EncryptedPayload envelope;
+        using (VellumDekCache writeCache = new())
+        {
+            PayloadEncryptor writer = BuildEncryptorOver(provider, writeStore, writeCache);
+            envelope = await writer.EncryptAsync(plaintext, Scope);
+        }
+
+        // A different store, empty: the lookup by KeyId can only come back with nothing.
+        FakeEncryptionKeyStore storelessReader = new();
+        using VellumDekCache readCache = new();
+        PayloadEncryptor reader = BuildEncryptorOver(provider, storelessReader, readCache);
+
+        long attemptsBefore = VellumDecryptMetrics.FallbackAttemptsTotal;
+        long recoveredBefore = VellumDecryptMetrics.FallbackRecoveredTotal;
+
+        byte[] decrypted = await reader.DecryptAsync(envelope, Scope);
+
         decrypted.Should().Equal(plaintext);
+        VellumDecryptMetrics.FallbackAttemptsTotal.Should().Be(
+            attemptsBefore + 1,
+            "the store WAS consulted first and could not serve the key");
+        VellumDecryptMetrics.FallbackRecoveredTotal.Should().Be(
+            recoveredBefore + 1,
+            "the envelope's own copy is what decrypted the payload");
     }
 
     [Fact]
@@ -381,9 +411,16 @@ public sealed class PayloadEncryptorTests
             Options.Create(options),
             NullLogger<PayloadEncryptor>.Instance);
 
+        // Both resolution paths hit the same short-DEK provider, so both fail and the raised
+        // message names only the two failure TYPES (M1: it may be echoed to an untrusted caller).
+        // The AES-256 contract wording is therefore asserted on the causes, where it now lives.
         Func<Task> act = async () => await decryptOnly.DecryptAsync(envelope, Scope);
-        await act.Should().ThrowAsync<CryptographicException>()
-            .WithMessage("*expected 32 bytes*");
+        ExceptionAssertions<CryptographicException> thrown = await act.Should().ThrowAsync<CryptographicException>();
+
+        AggregateException? causes = thrown.Which.InnerException as AggregateException;
+        causes.Should().NotBeNull();
+        causes!.InnerExceptions.Should().AllSatisfy(cause =>
+            cause.Message.Should().Contain("expected 32 bytes", "the AES-256 length contract is what failed closed"));
     }
 
     [Fact]

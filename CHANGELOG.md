@@ -58,16 +58,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authentication tag check. Case (b) is the one that makes the reordering safe: a stale store
   record does not return *nothing*, it returns key material that does not work — without (b)
   a payload that decrypted in 0.3.x would start failing, and only at the moment someone read
-  an old row. Both are caught on the **type** of the failure, never on a backend's error text.
+  an old row. Neither is caught on a backend's error text, and neither on the exception type:
+  the catch is unconditional. The single thing it inspects is the **caller's cancellation
+  token** — a real cancellation is re-thrown, while a `TaskCanceledException` raised by a
+  store whose `HttpClient` simply timed out (`EnableResilience = false`) is a store failure and
+  falls back like any other.
 
-  **When both paths fail**, the raised `CryptographicException` names both attempts and
-  carries both causes in an inner `AggregateException`. A bare "decryption failed" would send
-  the reader hunting down one path when the other failed too.
+  **When both paths fail**, the raised `CryptographicException` names both attempts **by the
+  type of each failure** and carries both causes in an inner `AggregateException`. A bare
+  "decryption failed" would send the reader hunting down one path when the other failed too —
+  but the original messages stay out of the message text: since 0.4.0 a store failure can be an
+  `NpgsqlException` carrying a host and port, a `SqlException` carrying a server name and SQL,
+  or an `HttpRequestException` carrying a Vault URL, and consumers routinely map a
+  `CryptographicException` to a client-visible "invalid input" response. The messages are on the
+  causes and in the log (EventIds 2001 and 2003).
 
   **Nothing else changed**: `EncryptAsync`, `RewrapPayloadAsync`, the `EncryptedPayload`
   record, the DI registrations and the options are untouched. There is deliberately no feature
-  flag — the fallback only fires on inputs that already throw today, so a flag would be either
-  a device someone forgets to switch on, or an ornament.
+  flag — not because the fallback only fires where 0.3.x already threw (case *(b)* is exactly
+  an input that did **not** throw in 0.3.x: a wrong store record, which 0.3.x never consulted
+  and which decrypted fine off the envelope copy). The fallback exists precisely so that this
+  0.3.x success does not become a 0.4.0 failure, which leaves a flag with nothing to protect:
+  it would be either a device someone forgets to switch on, or an ornament.
 
 - **`EncryptedPayload.KeyId` is no longer audit-only.** A consumer that persists envelopes
   field-by-field must persist it faithfully. An envelope carrying `Guid.Empty` still decrypts:
