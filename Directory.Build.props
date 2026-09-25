@@ -48,9 +48,16 @@
     <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(IsPackable)' == 'true'">
-    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
-  </ItemGroup>
+  <!--
+    No Microsoft.SourceLink.GitHub PackageReference here on purpose: SourceLink ships
+    inside the .NET SDK since .NET 8, and this repo targets net8.0 and up, so the package
+    was only ever needed by earlier SDKs. Its sole dependency, Microsoft.Build.Tasks.Git
+    8.0.0, carries GHSA-23fw-v26w-5fgq (moderate) with no fixed version published (8.0.0
+    is the latest release of both), so the advisory could not be resolved by an upgrade.
+    The properties the SDK's SourceLink needs are all set above:
+    PublishRepositoryUrl, EmbedUntrackedSources, DebugType portable, IncludeSymbols,
+    SymbolPackageFormat snupkg, ContinuousIntegrationBuild.
+  -->
 
   <PropertyGroup Condition="$(MSBuildProjectName.Contains('Tests'))">
     <IsPackable>false</IsPackable>
