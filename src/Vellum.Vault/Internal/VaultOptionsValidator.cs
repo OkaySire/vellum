@@ -109,6 +109,18 @@ internal sealed class VaultOptionsValidator : IValidateOptions<VaultOptions>
             failures.Add($"{nameof(VaultOptions.KeyName)} must be a non-empty Vault Transit key name.");
         }
 
+        // A mount that is empty once normalised renders 'v1//encrypt/key', and Vault answers that
+        // with a 404 that names no cause. Raise it here, where the message can name the property.
+        // Surrounding slashes are NOT a failure: 'transit/' is normalised, not rejected — an
+        // operator writing it has made no design mistake.
+        if (options.TransitMount is null ||
+            options.TransitMount.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length == 0)
+        {
+            failures.Add($"{nameof(VaultOptions.TransitMount)} must be a non-empty Transit secrets-engine mount " +
+                         "path (e.g. 'transit', 'transit-zone-b', or a nested 'zone-b/transit'); leading and " +
+                         "trailing slashes are optional and are normalised away.");
+        }
+
         if (options.HttpTimeout <= TimeSpan.Zero)
         {
             failures.Add($"{nameof(VaultOptions.HttpTimeout)} must be a positive duration; got {options.HttpTimeout}.");
