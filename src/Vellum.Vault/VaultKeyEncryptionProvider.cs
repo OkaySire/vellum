@@ -16,10 +16,14 @@ namespace Vellum.Vault;
 /// <b>Backend contract.</b> This provider calls the Vault Transit HTTP API:
 /// </para>
 /// <list type="bullet">
-///   <item><description><c>POST /v1/transit/encrypt/{key}</c> — wraps a DEK, returns <c>vault:v{N}:…</c>.</description></item>
-///   <item><description><c>POST /v1/transit/decrypt/{key}</c> — unwraps a previously-wrapped DEK.</description></item>
-///   <item><description><c>POST /v1/transit/rewrap/{key}</c> — re-encrypts a wrapped DEK under the latest key version, entirely inside Vault.</description></item>
+///   <item><description><c>POST /v1/{mount}/encrypt/{key}</c> — wraps a DEK, returns <c>vault:v{N}:…</c>.</description></item>
+///   <item><description><c>POST /v1/{mount}/decrypt/{key}</c> — unwraps a previously-wrapped DEK.</description></item>
+///   <item><description><c>POST /v1/{mount}/rewrap/{key}</c> — re-encrypts a wrapped DEK under the latest key version, entirely inside Vault.</description></item>
 /// </list>
+/// <para>
+/// <c>{mount}</c> is <see cref="VaultOptions.TransitMount"/>, which defaults to <c>transit</c> —
+/// the path Vault uses when the engine is enabled without an explicit <c>-path</c>.
+/// </para>
 /// <para>
 /// <b>Provider version.</b> The version segment of the Vault ciphertext (e.g. <c>v1</c>, <c>v2</c>)
 /// is extracted and stored verbatim in <see cref="WrappedKey.ProviderVersion"/> to preserve the
@@ -175,7 +179,7 @@ public sealed partial class VaultKeyEncryptionProvider(
 
     /// <inheritdoc />
     /// <remarks>
-    /// Delegates to Vault Transit's native <c>POST /v1/transit/rewrap/{key}</c> endpoint: the
+    /// Delegates to Vault Transit's native <c>POST /v1/{mount}/rewrap/{key}</c> endpoint: the
     /// plaintext DEK never leaves Vault. The returned ciphertext is wrapped under the latest
     /// key version, whose <c>v{N}</c> segment is extracted into
     /// <see cref="WrappedKey.ProviderVersion"/> exactly like <see cref="WrapAsync(ReadOnlyMemory{byte}, CancellationToken)"/>.
@@ -240,14 +244,45 @@ public sealed partial class VaultKeyEncryptionProvider(
     }
 
     /// <summary>
-    /// Builds the relative transit-engine URL for a given operation, URL-encoding the key name
-    /// so that names with reserved characters are transmitted safely.
+    /// Builds the relative transit-engine URL for a given operation, URL-encoding the mount
+    /// segments and the key name so that names with reserved characters are transmitted safely.
     /// </summary>
+    /// <remarks>
+    /// The single funnel for all three operations (encrypt, decrypt, rewrap): making the mount
+    /// configurable here is what guarantees no operation keeps a hard-coded <c>transit</c> path.
+    /// </remarks>
     private string BuildTransitPath(string operation)
     {
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"v1/transit/{operation}/{Uri.EscapeDataString(_options.KeyName)}");
+            $"v1/{BuildMountPath(_options.TransitMount)}/{operation}/{Uri.EscapeDataString(_options.KeyName)}");
+    }
+
+    /// <summary>
+    /// Normalises and escapes a Transit mount path: surrounding slashes and blank segments are
+    /// dropped, and each remaining segment is escaped individually so that a nested mount such as
+    /// <c>zone-b/transit</c> keeps its internal <c>/</c> as a path separator instead of being
+    /// mangled into <c>zone-b%2Ftransit</c>. Mirrors
+    /// <c>AppRoleVaultTokenProvider.BuildLoginPath</c>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The mount is empty once normalised. <c>VaultOptionsValidator</c> already rejects this at
+    /// start-up, but a provider composed by hand bypasses the validator: fail closed here rather
+    /// than issue <c>v1//encrypt/key</c> and let Vault answer a 404 that names no cause.
+    /// </exception>
+    private static string BuildMountPath(string mount)
+    {
+        string[] segments = (mount ?? string.Empty)
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (segments.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(VaultOptions)}.{nameof(VaultOptions.TransitMount)} must be a non-empty Transit mount " +
+                "path (e.g. 'transit' or 'zone-b/transit').");
+        }
+
+        return string.Join('/', segments.Select(Uri.EscapeDataString));
     }
 
     /// <summary>

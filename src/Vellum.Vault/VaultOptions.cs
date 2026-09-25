@@ -61,6 +61,37 @@ public sealed class VaultOptions
     public string AppRoleMount { get; set; } = "approle";
 
     /// <summary>
+    /// Gets or sets the mount path of the Transit secrets engine, without the <c>v1/</c> prefix
+    /// or surrounding slashes — for example, <c>transit</c> (the default), a per-zone
+    /// <c>transit-zone-b</c>, or a nested <c>zone-b/transit</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This property exists so that several deployments can share one Vault cluster while each
+    /// product or zone owns its own Transit mount: two <see cref="VaultKeyEncryptionProvider"/>
+    /// instances configured with different mounts address different engines, hence different
+    /// KEKs. The default <c>transit</c> is the mount created by
+    /// <c>vault secrets enable transit</c>, so an existing configuration that never set this
+    /// property keeps the exact path it had before.
+    /// </para>
+    /// <para>
+    /// <b>Unrelated to <see cref="AppRoleMount"/>.</b> That one is an <c>auth/</c> mount used to
+    /// obtain a token; this one is a <c>secrets</c> mount used to wrap and unwrap DEKs. The two
+    /// are independent and normally hold different values.
+    /// </para>
+    /// <para>
+    /// The value is normalised: leading and trailing slashes are trimmed and empty segments are
+    /// dropped, so <c>/transit/</c> and <c>transit</c> are equivalent. Each remaining segment is
+    /// URL-encoded individually rather than the whole string at once, which keeps an internal
+    /// <c>/</c> as a path separator — that is what makes a nested mount such as
+    /// <c>zone-b/transit</c> work instead of being mangled into <c>zone-b%2Ftransit</c>. A value
+    /// that is empty once normalised fails validation at start-up, because Vault would otherwise
+    /// answer an unexplained <c>404</c> on the first wrap.
+    /// </para>
+    /// </remarks>
+    public string TransitMount { get; set; } = "transit";
+
+    /// <summary>
     /// Gets or sets the AppRole role id. Required when <see cref="AuthMethod"/> is
     /// <see cref="VaultAuthMethod.AppRole"/>; must be empty otherwise.
     /// </summary>

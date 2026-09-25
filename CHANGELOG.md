@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-25
+
+### Added
+
+- **`VaultOptions.TransitMount` — the Transit secrets-engine mount is now configurable**
+  (default `"transit"`). Until 0.2.x the mount was a literal in
+  `VaultKeyEncryptionProvider.BuildTransitPath`, so every deployment sharing a Vault
+  cluster also shared one `transit/` engine. Infrastructure split into zones needs one
+  Transit mount per product, which this property expresses:
+
+  ```csharp
+  services.AddVaultProvider(opts =>
+  {
+      opts.Address = "https://vault.example.com:8200";
+      opts.TransitMount = "transit-zone-b";   // was hard-coded "transit"
+      opts.KeyName = "vellum-kek";
+  });
+  ```
+
+  **Backwards compatible**: the default `"transit"` is the path Vault uses when the engine
+  is enabled without an explicit `-path`, so a configuration that never sets the property
+  issues byte-identical requests to 0.2.x. All three operations (encrypt, decrypt, rewrap)
+  go through the single path builder, so none keeps a hard-coded mount.
+
+  Nested mounts (`zone-b/transit`) are supported: mount segments are escaped one by one,
+  as `AppRoleVaultTokenProvider` already does for `AppRoleMount`, so an internal `/` stays
+  a path separator instead of becoming `%2F`. Leading/trailing slashes and blank segments
+  are normalised away; a mount that is empty once normalised fails `ValidateOnStart()` with
+  a message naming `TransitMount`, rather than producing `v1//encrypt/key` and an
+  unexplained Vault `404`.
+
+  `TransitMount` is unrelated to `AppRoleMount`: the latter is an `auth/` mount used to
+  obtain a token, the former a `secrets` mount used to wrap and unwrap DEKs.
+
 ## [0.2.0] — 2026-06-12
 
 Remediation release driven by a full security + rotation review after the VPS
