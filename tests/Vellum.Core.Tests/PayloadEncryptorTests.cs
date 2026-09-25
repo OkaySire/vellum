@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using FluentAssertions;
+using FluentAssertions.Specialized;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Vellum.Tests.Fakes;
@@ -8,6 +9,7 @@ using Xunit;
 
 namespace Vellum.Tests;
 
+[Collection("PayloadDecryptMetrics")]
 public sealed class PayloadEncryptorTests
 {
     private const string Scope = "tenant:42";
@@ -45,6 +47,43 @@ public sealed class PayloadEncryptorTests
             NullLogger<PayloadEncryptor>.Instance);
 
         return (encryptor, provider, dekManager);
+    }
+
+    /// <summary>
+    /// Builds an encryptor over caller-supplied collaborators, so a test can simulate a fresh
+    /// process reading an existing row: same store and same KEK provider, but a COLD
+    /// <see cref="VellumDekCache"/>. Needed since 0.4.0, because decrypt resolves the DEK by
+    /// <see cref="EncryptedPayload.KeyId"/> and the encrypt leaves that very entry cache-hot —
+    /// reusing one cache would make every decrypt free and hide the round-trip under test.
+    /// </summary>
+    private static PayloadEncryptor BuildEncryptorOver(
+        FakeKeyEncryptionProvider provider,
+        FakeEncryptionKeyStore store,
+        VellumDekCache cache,
+        TimeSpan? dekCacheTtl = null)
+    {
+        CountingRandomBytesProvider random = new();
+        VellumOptions options = new();
+        if (dekCacheTtl is not null)
+        {
+            options.DekCacheTtl = dekCacheTtl.Value;
+        }
+
+        DekManager manager = new(
+            provider,
+            store,
+            cache,
+            random,
+            TimeProvider.System,
+            Options.Create(options),
+            NullLogger<DekManager>.Instance);
+
+        return new PayloadEncryptor(
+            manager,
+            provider,
+            random,
+            Options.Create(options),
+            NullLogger<PayloadEncryptor>.Instance);
     }
 
     [Fact]
@@ -149,76 +188,163 @@ public sealed class PayloadEncryptorTests
     }
 
     [Fact]
-    public async Task Decrypt_SelfContained_UsesOwnEnvelopeNotStoreLookup()
+    public async Task Decrypt_SelfContained_SucceedsWithAStoreThatCannotServeTheKey()
     {
-        // Envelopes carry their own WrappedKey, so decryption goes through the
-        // IKeyEncryptionProvider via IDekManager.GetDekByWrappedKeyAsync — never back to
-        // IEncryptionKeyStore. This pins the self-contained envelope contract (C3).
-        (PayloadEncryptor encryptor, _, _) = BuildSut();
-
+        // The self-contained envelope contract (C3), restated for 0.4.0. C3 guarantees that an
+        // envelope carries everything needed to decrypt it; it does NOT say the store is left alone
+        // — since 0.4.0 decrypt asks IEncryptionKeyStore by KeyId FIRST and only then reads the
+        // envelope's own WrappedKey. So the guarantee is tested the only way it still can be: the
+        // reader is handed a store that has never heard of this KeyId, and the decrypt must still
+        // succeed off the envelope copy.
+        //
+        // (Until this rename the test was Decrypt_SelfContained_UsesOwnEnvelopeNotStoreLookup and
+        // claimed "never back to IEncryptionKeyStore" — the opposite of the 0.4.0 order. It passed
+        // only because the single store present happened to serve the key, i.e. through the path it
+        // asserted was not taken.)
+        FakeKeyEncryptionProvider provider = new();
+        FakeEncryptionKeyStore writeStore = new();
         byte[] plaintext = Encoding.UTF8.GetBytes("self contained");
-        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
 
-        byte[] decrypted = await encryptor.DecryptAsync(envelope, Scope);
+        EncryptedPayload envelope;
+        using (VellumDekCache writeCache = new())
+        {
+            PayloadEncryptor writer = BuildEncryptorOver(provider, writeStore, writeCache);
+            envelope = await writer.EncryptAsync(plaintext, Scope);
+        }
+
+        // A different store, empty: the lookup by KeyId can only come back with nothing.
+        FakeEncryptionKeyStore storelessReader = new();
+        using VellumDekCache readCache = new();
+        PayloadEncryptor reader = BuildEncryptorOver(provider, storelessReader, readCache);
+
+        long attemptsBefore = VellumDecryptMetrics.FallbackAttemptsTotal;
+        long recoveredBefore = VellumDecryptMetrics.FallbackRecoveredTotal;
+
+        byte[] decrypted = await reader.DecryptAsync(envelope, Scope);
+
         decrypted.Should().Equal(plaintext);
+        VellumDecryptMetrics.FallbackAttemptsTotal.Should().Be(
+            attemptsBefore + 1,
+            "the store WAS consulted first and could not serve the key");
+        VellumDecryptMetrics.FallbackRecoveredTotal.Should().Be(
+            recoveredBefore + 1,
+            "the envelope's own copy is what decrypted the payload");
     }
 
     [Fact]
     public async Task DecryptAsync_CachesUnwrappedDek_OnSecondCall()
     {
-        // Issue #6: two DecryptAsync calls on the same envelope must trigger exactly ONE
-        // IKeyEncryptionProvider.UnwrapAsync. The second call hits the wrapped-key cache.
-        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut(
-            dekCacheTtl: TimeSpan.FromMinutes(30));
-
+        // Issue #6, restated for the 0.4.0 resolution order: two DecryptAsync calls on the same
+        // envelope must trigger exactly ONE IKeyEncryptionProvider.UnwrapAsync. Decrypt now
+        // resolves the DEK by KeyId through the store, so the cache entry that has to absorb the
+        // second call is the by-id one — and the read must start from a COLD cache, otherwise the
+        // entry the encrypt left behind makes both decrypts free and the test proves nothing.
+        FakeKeyEncryptionProvider provider = new();
+        FakeEncryptionKeyStore store = new();
         byte[] plaintext = Encoding.UTF8.GetBytes("cached decrypt payload");
-        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
+
+        EncryptedPayload envelope;
+        using (VellumDekCache writeCache = new())
+        {
+            PayloadEncryptor writer = BuildEncryptorOver(provider, store, writeCache, TimeSpan.FromMinutes(30));
+            envelope = await writer.EncryptAsync(plaintext, Scope);
+        }
+
+        using VellumDekCache readCache = new();
+        PayloadEncryptor reader = BuildEncryptorOver(provider, store, readCache, TimeSpan.FromMinutes(30));
 
         int unwrapsBefore = provider.UnwrapCalls;
-        _ = await encryptor.DecryptAsync(envelope, Scope);
-        _ = await encryptor.DecryptAsync(envelope, Scope);
+        (await reader.DecryptAsync(envelope, Scope)).Should().Equal(plaintext);
+        (await reader.DecryptAsync(envelope, Scope)).Should().Equal(plaintext);
 
         provider.UnwrapCalls.Should().Be(unwrapsBefore + 1,
-            "the second decrypt must hit the wrapped-key cache and avoid a second KEK round-trip");
+            "the second decrypt must hit the by-id cache and avoid a second KEK round-trip");
     }
 
     [Fact]
-    public async Task DecryptAsync_DifferentWrappedKeys_UnwrapBoth()
+    public async Task DecryptAsync_ByIdCacheHotFromEncrypt_CostsNoKekRoundTrip()
     {
-        // Issue #6: the cache is keyed by the hash of the wrapped ciphertext, not by
-        // envelope identity. Two envelopes with DIFFERENT wrapped keys must each trigger
-        // their own Unwrap, even when produced by the same PayloadEncryptor.
-        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, DekManager dekManager) =
-            BuildSut(dekCacheTtl: TimeSpan.FromMinutes(30));
+        // 0.4.0 side effect worth pinning: EncryptAsync caches the active DEK under BOTH the
+        // active-scope key and the by-id key, and decrypt now looks up by id — so a decrypt that
+        // follows its own encrypt in the same process pays no KEK round-trip at all. In 0.3.x it
+        // paid one, because the wrapped-ciphertext cache key had never been populated.
+        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut(
+            dekCacheTtl: TimeSpan.FromMinutes(30));
 
-        // First envelope under scope A — primes the cache for WrappedKey A.
-        EncryptedPayload envelopeA = await encryptor.EncryptAsync(
-            Encoding.UTF8.GetBytes("payload-a"),
-            scope: "tenant:a");
-        _ = await encryptor.DecryptAsync(envelopeA, scope: "tenant:a");
+        byte[] plaintext = Encoding.UTF8.GetBytes("no round-trip at all");
+        EncryptedPayload envelope = await encryptor.EncryptAsync(plaintext, Scope);
 
-        // Rotate the DEK for scope A so the next EncryptAsync produces a DIFFERENT
-        // WrappedKey (different ciphertext handle in the fake provider). This guarantees
-        // envelopeA.WrappedDek != envelopeB.WrappedDek even within the same scope.
-        await dekManager.RotateDekAsync(scope: "tenant:a");
+        int unwrapsBefore = provider.UnwrapCalls;
+        (await encryptor.DecryptAsync(envelope, Scope)).Should().Equal(plaintext);
 
-        EncryptedPayload envelopeB = await encryptor.EncryptAsync(
-            Encoding.UTF8.GetBytes("payload-b"),
-            scope: "tenant:a");
+        provider.UnwrapCalls.Should().Be(unwrapsBefore,
+            "the encrypt already cached this DEK under its by-id key, which is the key decrypt now looks up");
+    }
 
+    [Fact]
+    public async Task DecryptAsync_TwoDistinctKeys_UnwrapBoth()
+    {
+        // 0.4.0 restatement of the Issue #6 partitioning guarantee at the encryptor level: the
+        // decrypt cache is partitioned per resolved key, so two envelopes written under two
+        // DIFFERENT DEKs each cost their own Unwrap, and neither serves the other. The cache-key
+        // derivation itself (SHA-256 of the wrapped ciphertext for the fallback path, scope+id for
+        // the store path) is pinned in DekManagerTests; what is asserted here is that decrypting
+        // through PayloadEncryptor never mixes two keys up.
+        const string ScopeA = "tenant:a";
+        FakeKeyEncryptionProvider provider = new();
+        FakeEncryptionKeyStore store = new();
+
+        EncryptedPayload envelopeA;
+        EncryptedPayload envelopeB;
+        using (VellumDekCache writeCache = new())
+        {
+            CountingRandomBytesProvider random = new();
+            VellumOptions writeOptions = new() { DekCacheTtl = TimeSpan.FromMinutes(30) };
+            DekManager writeManager = new(
+                provider,
+                store,
+                writeCache,
+                random,
+                TimeProvider.System,
+                Options.Create(writeOptions),
+                NullLogger<DekManager>.Instance);
+            PayloadEncryptor writer = new(
+                writeManager,
+                provider,
+                random,
+                Options.Create(writeOptions),
+                NullLogger<PayloadEncryptor>.Instance);
+
+            envelopeA = await writer.EncryptAsync(Encoding.UTF8.GetBytes("payload-a"), ScopeA);
+
+            // Rotation gives scope A a second DEK, so envelopeB carries a different KeyId AND a
+            // different wrapped ciphertext.
+            await writeManager.RotateDekAsync(ScopeA);
+            envelopeB = await writer.EncryptAsync(Encoding.UTF8.GetBytes("payload-b"), ScopeA);
+        }
+
+        envelopeB.KeyId.Should().NotBe(envelopeA.KeyId, "rotation must produce a fresh DEK record");
         envelopeB.WrappedDek.Should().NotBe(envelopeA.WrappedDek,
             "rotation must produce a fresh DEK and therefore a fresh wrapped ciphertext");
 
-        int unwrapsBefore = provider.UnwrapCalls;
-        _ = await encryptor.DecryptAsync(envelopeB, scope: "tenant:a");
-        provider.UnwrapCalls.Should().Be(unwrapsBefore + 1,
-            "a different wrapped key must miss the cache and trigger its own Unwrap");
+        // Cold cache: a fresh process reading both rows.
+        using VellumDekCache readCache = new();
+        PayloadEncryptor reader = BuildEncryptorOver(provider, store, readCache, TimeSpan.FromMinutes(30));
 
-        // And decrypting envelopeA a second time should still be a cache hit.
+        int unwrapsBefore = provider.UnwrapCalls;
+        (await reader.DecryptAsync(envelopeA, ScopeA)).Should().Equal(Encoding.UTF8.GetBytes("payload-a"));
+        provider.UnwrapCalls.Should().Be(unwrapsBefore + 1, "the first key is a cache miss");
+
+        (await reader.DecryptAsync(envelopeB, ScopeA)).Should().Equal(Encoding.UTF8.GetBytes("payload-b"));
+        provider.UnwrapCalls.Should().Be(unwrapsBefore + 2,
+            "a different key must miss the cache and trigger its own Unwrap, not reuse the first one");
+
+        // And both stay cache-hot afterwards, independently of one another.
         int unwrapsAfter = provider.UnwrapCalls;
-        _ = await encryptor.DecryptAsync(envelopeA, scope: "tenant:a");
+        (await reader.DecryptAsync(envelopeA, ScopeA)).Should().Equal(Encoding.UTF8.GetBytes("payload-a"));
+        (await reader.DecryptAsync(envelopeB, ScopeA)).Should().Equal(Encoding.UTF8.GetBytes("payload-b"));
         provider.UnwrapCalls.Should().Be(unwrapsAfter,
-            "envelopeA's wrapped key must still be cache-hot after envelopeB's decrypt");
+            "each key keeps its own live cache entry after the other one has been decrypted");
     }
 
     [Fact]
@@ -285,9 +411,16 @@ public sealed class PayloadEncryptorTests
             Options.Create(options),
             NullLogger<PayloadEncryptor>.Instance);
 
+        // Both resolution paths hit the same short-DEK provider, so both fail and the raised
+        // message names only the two failure TYPES (M1: it may be echoed to an untrusted caller).
+        // The AES-256 contract wording is therefore asserted on the causes, where it now lives.
         Func<Task> act = async () => await decryptOnly.DecryptAsync(envelope, Scope);
-        await act.Should().ThrowAsync<CryptographicException>()
-            .WithMessage("*expected 32 bytes*");
+        ExceptionAssertions<CryptographicException> thrown = await act.Should().ThrowAsync<CryptographicException>();
+
+        AggregateException? causes = thrown.Which.InnerException as AggregateException;
+        causes.Should().NotBeNull();
+        causes!.InnerExceptions.Should().AllSatisfy(cause =>
+            cause.Message.Should().Contain("expected 32 bytes", "the AES-256 length contract is what failed closed"));
     }
 
     [Fact]
@@ -631,37 +764,44 @@ public sealed class PayloadEncryptorTests
     [Fact]
     public async Task RewrapPayloadAsync_CacheInteraction_BothOldAndNewEnvelopesDecrypt()
     {
-        // L24: the decrypt cache is keyed by SHA-256 of WrappedKey.Ciphertext. A rewrapped
-        // envelope carries a NEW ciphertext, so it gets a NEW cache key automatically — no
-        // invalidation needed. The OLD envelope's entry stays valid and keeps serving cache
-        // hits until it ages out. Both entries hold the SAME plaintext DEK, so both envelopes
-        // decrypt correctly regardless of which path they take.
-        (PayloadEncryptor encryptor, FakeKeyEncryptionProvider provider, _) = BuildSut();
-
+        // L24 restated for 0.4.0: rewrapping an envelope changes only EncryptedPayload.WrappedDek,
+        // and decrypt resolves by KeyId — which the rewrap carries over verbatim. So the rewrapped
+        // envelope no longer forces a cache miss the way it did in 0.3.x (where the cache key was
+        // the SHA-256 of the wrapped ciphertext, and a new ciphertext meant a new key). Both
+        // envelopes decrypt, and they share a single resolution and a single cache entry.
+        FakeKeyEncryptionProvider provider = new();
+        FakeEncryptionKeyStore store = new();
         byte[] plaintext = Encoding.UTF8.GetBytes("cache interaction");
-        EncryptedPayload oldEnvelope = await encryptor.EncryptAsync(plaintext, Scope);
 
-        // Prime the wrapped-key cache for the OLD envelope.
+        EncryptedPayload oldEnvelope;
+        using (VellumDekCache writeCache = new())
+        {
+            PayloadEncryptor writer = BuildEncryptorOver(provider, store, writeCache);
+            oldEnvelope = await writer.EncryptAsync(plaintext, Scope);
+        }
+
+        // Cold cache: a fresh process reading the row.
+        using VellumDekCache readCache = new();
+        PayloadEncryptor encryptor = BuildEncryptorOver(provider, store, readCache);
+
+        int unwrapsBefore = provider.UnwrapCalls;
         (await encryptor.DecryptAsync(oldEnvelope, Scope)).Should().Equal(plaintext);
+        provider.UnwrapCalls.Should().Be(unwrapsBefore + 1, "cold cache: the store record is unwrapped once");
         int unwrapsAfterPrime = provider.UnwrapCalls;
 
         EncryptedPayload newEnvelope = await encryptor.RewrapPayloadAsync(oldEnvelope);
+        newEnvelope.WrappedDek.Should().NotBe(oldEnvelope.WrappedDek, "the rewrap must produce a fresh ciphertext");
+        newEnvelope.KeyId.Should().Be(oldEnvelope.KeyId, "the rewrap carries the KeyId over verbatim");
 
-        // 1) The NEW envelope decrypts via the cold path: its rewrapped ciphertext hashes to
-        //    a cache key nothing has populated yet, so exactly one unwrap round-trip happens.
+        // 1) The NEW envelope decrypts with NO extra unwrap: same KeyId, same live cache entry.
         (await encryptor.DecryptAsync(newEnvelope, Scope)).Should().Equal(plaintext);
-        provider.UnwrapCalls.Should().Be(unwrapsAfterPrime + 1,
-            "the rewrapped ciphertext produces a new cache key, so the first decrypt is a cache miss");
+        provider.UnwrapCalls.Should().Be(unwrapsAfterPrime,
+            "the rewrapped envelope resolves through the same KeyId, so it no longer costs a cache miss");
 
-        // 2) The OLD envelope still decrypts from its live cache entry — zero extra unwraps.
+        // 2) The OLD envelope still decrypts too — the rewrap invalidates nothing.
         (await encryptor.DecryptAsync(oldEnvelope, Scope)).Should().Equal(plaintext);
-        provider.UnwrapCalls.Should().Be(unwrapsAfterPrime + 1,
-            "the old envelope's cache entry is untouched by the rewrap and keeps serving hits");
-
-        // 3) And the NEW envelope is now cached too.
-        (await encryptor.DecryptAsync(newEnvelope, Scope)).Should().Equal(plaintext);
-        provider.UnwrapCalls.Should().Be(unwrapsAfterPrime + 1,
-            "the second decrypt of the rewrapped envelope must hit the cache");
+        provider.UnwrapCalls.Should().Be(unwrapsAfterPrime,
+            "the rewrap touched neither the store record nor the cache entry the old envelope resolves to");
     }
 
     /// <summary>

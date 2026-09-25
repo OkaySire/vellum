@@ -65,8 +65,8 @@ curl http://localhost:5000/notes/<guid>
 # => {"id":"<guid>","text":"hello vellum"}
 ```
 
-The second fetch for the same note is fully cache-hot — the wrapped-DEK is served
-from Vellum's built-in decrypt cache (see
+The second fetch for the same note is fully cache-hot — the DEK is served from
+Vellum's built-in decrypt cache (see
 [#6](https://github.com/OkaySire/vellum/issues/6)). No round-trip to Vault on the
 second read.
 

@@ -49,6 +49,10 @@ public sealed class FakeEncryptionKeyStore : IEncryptionKeyStore
     public Task<EncryptionKey?> GetByIdAsync(Guid keyId, string scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
+
+        // A real store observes the token. Honouring it here is what lets a test prove that
+        // PayloadEncryptor's store-first decrypt does not swallow a cancellation into a fallback.
+        cancellationToken.ThrowIfCancellationRequested();
         if (!_byId.TryGetValue(keyId, out EncryptionKey? key))
         {
             return Task.FromResult<EncryptionKey?>(null);

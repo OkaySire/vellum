@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -8,15 +9,52 @@ namespace Vellum;
 /// <summary>
 /// Default <see cref="IPayloadEncryptor"/> implementation built on AES-256-GCM and envelope
 /// encryption. Encryption resolves the active DEK for the given scope via
-/// <see cref="IDekManager"/>; decryption unwraps the DEK embedded in the self-contained
-/// <see cref="EncryptedPayload"/> via <see cref="IKeyEncryptionProvider"/> alone.
+/// <see cref="IDekManager"/>; decryption resolves the DEK from
+/// <see cref="IEncryptionKeyStore"/> by <see cref="EncryptedPayload.KeyId"/> first and falls back
+/// to the wrapped DEK copy embedded in the self-contained <see cref="EncryptedPayload"/>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Self-contained decryption.</b> Because <see cref="EncryptedPayload"/> bundles the
-/// <see cref="WrappedKey"/> used to wrap the DEK, decryption requires only the KEK provider
-/// and has no round-trip to <see cref="IEncryptionKeyStore"/>. This matches the design of the
-/// AWS Encryption SDK and Google Tink.
+/// <b>Store first, envelope copy as a fallback (0.4.0).</b> <see cref="DecryptAsync"/> asks
+/// <see cref="IDekManager.GetDekByKeyIdAsync"/> for the DEK behind
+/// <see cref="EncryptedPayload.KeyId"/> before looking at
+/// <see cref="EncryptedPayload.WrappedDek"/>. The store holds <i>one</i> wrapped-DEK record per
+/// key, so rewrapping a DEK against a different KEK (a new Vault Transit mount, a new KMS key)
+/// only has to update those records — the envelopes persisted alongside each row do not have to
+/// be rewritten, and the order of the two operations stops mattering.
+/// </para>
+/// <para>
+/// <b>What the fallback covers.</b> The envelope's own copy is used when the store cannot serve
+/// the key (<i>(a)</i> unknown <see cref="EncryptedPayload.KeyId"/>, scope mismatch, store
+/// unreachable) <b>and</b> when the store <i>does</i> return a record but that record fails to
+/// unwrap or fails the AES-GCM tag check (<i>(b)</i> a stale or wrong record — the store returns
+/// something, not nothing). Case (b) is what keeps the reordering safe: the fallback can only
+/// ever turn a failure into a success, never a success into a failure, because every payload that
+/// decrypted through the envelope copy in 0.3.x still reaches that copy in 0.4.0.
+/// </para>
+/// <para>
+/// <b>Typed, not textual.</b> The fallback triggers on the <i>type</i> of the failure raised by
+/// Vellum's own abstractions (and on AES-GCM's own authentication failure), never on the text of a
+/// KEK backend's error response. A wrong-mount Vault reply and a genuinely missing key both return
+/// HTTP 400 and differ only in wording, so any detection keyed on that wording would stop firing —
+/// silently — the day the backend rephrases it. Resolving from the store first removes the need to
+/// tell them apart at all.
+/// </para>
+/// <para>
+/// <b>What this costs (the store dependency).</b> Decryption now depends on
+/// <see cref="IEncryptionKeyStore"/>, hence usually on a database. For a backend that has just
+/// read the ciphertext out of that same database this is free. It is <b>not</b> free for a consumer
+/// decrypting a portable envelope with no store reachable: the store lookup is attempted, throws,
+/// and case (b) catches it, so the decrypt still succeeds off the envelope copy — but it pays one
+/// wasted round-trip (and, per decrypt, two KEK calls instead of one) before getting there. Such
+/// consumers should watch <see cref="VellumDecryptMetrics.FallbackAttemptsTotal"/>. Because the
+/// fallback also swallows a store-side scope mismatch, the store lookup adds no cross-tenant
+/// control that 0.3.x did not already have: scope binding remains enforced cryptographically by
+/// the format version 2 AAD, not by the lookup.
+/// </para>
+/// <para>
+/// <b>Observability.</b> Both paths are instrumented — see <see cref="VellumDecryptMetrics"/> for
+/// the gauges that distinguish "still migrating" from "genuinely broken".
 /// </para>
 /// <para>
 /// <b>AES-GCM layout.</b> The <see cref="EncryptedPayload.Ciphertext"/> field stores the raw
@@ -127,6 +165,43 @@ public sealed partial class PayloadEncryptor(
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// <para>
+    /// Resolves the DEK from <see cref="IEncryptionKeyStore"/> by
+    /// <see cref="EncryptedPayload.KeyId"/> first, then falls back to
+    /// <see cref="EncryptedPayload.WrappedDek"/>. See the type-level remarks on
+    /// <see cref="PayloadEncryptor"/> for why the order is this way round, what the fallback
+    /// covers, and what the resulting dependency on the store costs a consumer that has no store.
+    /// </para>
+    /// <para>
+    /// <b>The thrown message carries no backend detail.</b> When both paths fail, the
+    /// <see cref="CryptographicException"/> message names only the two failure <i>types</i>. The
+    /// original messages — which may contain a host and port, a SQL statement, a Vault URL, or a
+    /// wrapped-DEK handle — are available on the inner <see cref="AggregateException"/> and in the
+    /// log (EventIds 2001 and 2003), deliberately not in the message, because consumers commonly map
+    /// a <see cref="CryptographicException"/> to a client-visible "invalid input" response.
+    /// </para>
+    /// <para>
+    /// <b>What cancellation means here.</b> A store-path failure is handed over to the envelope copy
+    /// unless <paramref name="cancellationToken"/> is actually cancelled. The exception type alone is
+    /// not the test: a bare <see cref="HttpClient"/> reports a timeout as a
+    /// <see cref="TaskCanceledException"/>, and a store that times out is a store failure, not a
+    /// cancellation the caller requested.
+    /// </para>
+    /// <para>
+    /// <b>Known consequence of the fallback (B2).</b> The catch around the store path is deliberately
+    /// unconditional, so it also absorbs <c>DekManager</c>'s internal cache invariant violation
+    /// ("This is a Vellum bug", logged <see cref="LogLevel.Critical"/> under EventId 1003): the
+    /// decrypt then succeeds off the envelope copy and the caller sees nothing. Confidentiality is
+    /// unaffected — the AES-GCM tag still gates every plaintext — but the <b>only</b> signal for that
+    /// invariant is the Critical log entry, not an exception at the call site. Operators must alert on
+    /// EventId 1003 rather than expect a failed decrypt.
+    /// </para>
+    /// </remarks>
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "The store-first resolution is an optimisation over a self-contained envelope, not a control: ANY failure of the store path must hand over to the envelope's own wrapped DEK copy, which is exactly what 0.3.x used unconditionally. Narrowing the catch to Vellum's own exception types would leave a consumer whose store is unreachable (DbException, socket failure, ...) worse off than before the reordering, which is the one outcome this change must not produce. A cancellation of the caller's OWN token is re-thrown by the filter — which tests the token rather than the exception type, so that a timeout-shaped TaskCanceledException from an HttpClient still falls back — and the fail-closed guarantee is preserved: when both paths fail the method throws an aggregate naming both failure types.")]
     public async Task<byte[]> DecryptAsync(
         EncryptedPayload payload,
         string scope,
@@ -167,12 +242,121 @@ public sealed partial class PayloadEncryptor(
                 $"Ciphertext too short to contain a {TagSize}-byte authentication tag.");
         }
 
+        // 0.4.0 — resolution order is store first, envelope copy second.
+        //
+        // Step 1: ask the store for the DEK behind payload.KeyId. The store holds ONE wrapped-DEK
+        // record per key, so re-wrapping a DEK against a different KEK only touches those records;
+        // the envelope copies persisted next to every row do not have to be rewritten.
+        //
+        // The step is skipped when the envelope carries no usable lookup pair: a Guid.Empty KeyId
+        // (hand-built envelopes, and the synthetic KeyId DekManager attaches to a wrapped-key
+        // resolution) has nothing to look up, and GetDekByKeyIdAsync requires a non-null scope,
+        // which format version 1 envelopes are explicitly allowed not to supply (see the scope
+        // validation above, deliberately limited to version 2). Skipping is recorded so that these
+        // decrypts — which the store can never serve — are visible rather than silently absent
+        // from the migration-backlog gauge.
+        Exception? storeFailure = null;
+        if (payload.KeyId == Guid.Empty || string.IsNullOrEmpty(scope))
+        {
+            VellumDecryptMetrics.RecordStoreLookupSkipped();
+        }
+        else
+        {
+            try
+            {
+                Dek storeDek = await _dekManager.GetDekByKeyIdAsync(payload.KeyId, scope, cancellationToken).ConfigureAwait(false);
+                byte[] plaintext = DecryptWithDek(storeDek, payload, scope, scopeBound);
+                LogPayloadDecrypted(_logger, payload.KeyId);
+                return plaintext;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                // Covers BOTH fallback cases with one catch, because both are the same thing from
+                // here: (a) the store could not serve the key at all, and (b) it served a record
+                // that then failed to unwrap or failed the AES-GCM tag check. Case (b) is the one
+                // that makes this reordering safe — a stale store record does not return "nothing",
+                // it returns key material that does not work, and without this catch such a payload
+                // would stop decrypting even though 0.3.x decrypted it fine off the envelope copy.
+                //
+                // Note what is NOT inspected: the message. A wrong-mount Vault reply and a missing
+                // key are both HTTP 400 and differ only in wording; keying anything on that wording
+                // is exactly the fragility this reordering exists to delete.
+                //
+                // B1: the filter cannot be a bare `ex is not OperationCanceledException`. An
+                // HttpClient with no resilience pipeline (VaultOptions.EnableResilience = false)
+                // reports a TIMEOUT as a TaskCanceledException, which IS an
+                // OperationCanceledException although nobody cancelled anything. Such a store
+                // timeout would escape the fallback, uncounted and unlogged, and reach the caller
+                // as a cancellation of a token they never cancelled. What identifies a real
+                // cancellation is the caller's token, not the exception type — so that is what is
+                // tested, and only then is the exception re-thrown.
+                storeFailure = ex;
+                VellumDecryptMetrics.RecordFallbackAttempt();
+                LogStoreLookupFallback(_logger, payload.KeyId, ex);
+            }
+        }
+
+        // Step 2: the wrapped DEK copy carried by the envelope — the sole path in 0.3.x.
+        //
         // Issue #6: route through IDekManager.GetDekByWrappedKeyAsync instead of calling
         // IKeyEncryptionProvider.UnwrapAsync directly. The manager caches unwrapped DEKs
         // keyed by a SHA-256 hash of the wrapped ciphertext so read-heavy workloads avoid
         // a Vault / KMS round-trip on every decrypt. The cache-hit path is synchronous
-        // (ValueTask) and allocation-free aside from the required Dek clone.
-        Dek dek = await _dekManager.GetDekByWrappedKeyAsync(payload.WrappedDek, cancellationToken).ConfigureAwait(false);
+        // (ValueTask) and allocation-free aside from the required Dek clone. That cache also
+        // amortises the doubled KEK traffic a fallback incurs, from the second read onwards.
+        try
+        {
+            Dek dek = await _dekManager.GetDekByWrappedKeyAsync(payload.WrappedDek, cancellationToken).ConfigureAwait(false);
+            byte[] plaintext = DecryptWithDek(dek, payload, scope, scopeBound);
+
+            if (storeFailure is not null)
+            {
+                // A recovered fallback IS the remaining-migration signal: this key's store record
+                // is stale and wants rewrapping against the KEK this process can reach.
+                VellumDecryptMetrics.RecordFallbackRecovered();
+                LogStoreLookupFallbackRecovered(_logger, payload.KeyId);
+            }
+
+            LogPayloadDecrypted(_logger, payload.KeyId);
+            return plaintext;
+        }
+        catch (Exception ex) when (storeFailure is not null && (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested))
+        {
+            // Both paths were tried and both failed: name both in the message. An operator reading
+            // a bare "decryption failed" would assume a single path and go looking down the wrong
+            // one. The AggregateException inner keeps the two originals intact for a stack trace.
+            //
+            // M1: the message names the two failure TYPES and nothing else — never the original
+            // messages. Since 0.4.0 the store failure can be any infrastructure exception
+            // (NpgsqlException with a host:port, SqlException with a server name and SQL text,
+            // HttpRequestException with a Vault URL), and this is a CryptographicException, a type
+            // many consumers map to "invalid input / 400" and echo straight back to the client. The
+            // envelope's WrappedKey.Ciphertext is likewise a wrapped-DEK handle that
+            // EncryptedPayload.ToString deliberately refuses to render, so a provider message
+            // quoting it must not travel here either. Diagnosis is not lost: both originals are in
+            // the inner AggregateException, and the store failure was already logged at EventId 2001
+            // with its own exception attached.
+            VellumDecryptMetrics.RecordFallbackFailed();
+            LogBothDekPathsFailed(_logger, payload.KeyId, ex);
+            throw new CryptographicException(
+                $"Decryption failed for key {payload.KeyId} after BOTH DEK resolution paths were attempted. "
+                + $"(1) Key store lookup by KeyId threw {storeFailure.GetType().FullName}. "
+                + $"(2) Fallback to the wrapped DEK carried by the envelope also threw {ex.GetType().FullName}. "
+                + "The two original exceptions — including their messages — are preserved in the inner "
+                + "AggregateException and in the Vellum log (EventIds 2001 and 2003); they are kept out "
+                + "of this message because it may be surfaced to an untrusted caller.",
+                new AggregateException(storeFailure, ex));
+        }
+    }
+
+    /// <summary>
+    /// Runs the AES-GCM decryption for an already-resolved <paramref name="dek"/> and takes
+    /// ownership of its key bytes: they are zeroed before returning, whether the operation
+    /// succeeds or throws. Shared by both resolution paths so the two can never drift apart in
+    /// their length check, AAD construction, or memory hygiene.
+    /// </summary>
+    private static byte[] DecryptWithDek(Dek dek, EncryptedPayload payload, string scope, bool scopeBound)
+    {
         try
         {
             // H-1 symmetry: the slow path in DekManager already enforces the AES-256 length
@@ -201,7 +385,6 @@ public sealed partial class PayloadEncryptor(
                 aesGcm.Decrypt(payload.Nonce, ciphertext, tag, plaintext, associatedData);
             }
 
-            LogPayloadDecrypted(_logger, payload.KeyId);
             return plaintext;
         }
         finally
@@ -244,6 +427,28 @@ public sealed partial class PayloadEncryptor(
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Payload decrypted with key {KeyId}")]
     private static partial void LogPayloadDecrypted(ILogger logger, Guid keyId);
+
+    // 0.4.0 — EventIds 2001/2002/2003 are stable and distinct so an operator can alert on the
+    // three outcomes separately: a fallback was needed (2001), it worked and therefore names a
+    // key record still to migrate (2002), or both resolution paths failed (2003).
+
+    [LoggerMessage(
+        EventId = 2001,
+        Level = LogLevel.Warning,
+        Message = "Key store lookup for DEK {KeyId} failed; falling back to the wrapped DEK carried by the envelope")]
+    private static partial void LogStoreLookupFallback(ILogger logger, Guid keyId, Exception exception);
+
+    [LoggerMessage(
+        EventId = 2002,
+        Level = LogLevel.Warning,
+        Message = "Decrypt recovered via the envelope's own wrapped DEK after the key store lookup for {KeyId} failed: the stored key record is stale and should be rewrapped against the reachable KEK")]
+    private static partial void LogStoreLookupFallbackRecovered(ILogger logger, Guid keyId);
+
+    [LoggerMessage(
+        EventId = 2003,
+        Level = LogLevel.Error,
+        Message = "Decrypt failed for DEK {KeyId} after BOTH the key store lookup and the envelope's wrapped DEK copy were tried")]
+    private static partial void LogBothDekPathsFailed(ILogger logger, Guid keyId, Exception exception);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Payload envelope rewrapped for key {KeyId} (new provider version {ProviderVersion})")]
     private static partial void LogPayloadRewrapped(ILogger logger, Guid keyId, string providerVersion);

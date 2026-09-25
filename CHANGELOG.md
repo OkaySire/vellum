@@ -7,6 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-25
+
+### Changed
+
+- **BEHAVIOUR: `DecryptAsync` now resolves the DEK from the key store first, and only falls
+  back to the wrapped-DEK copy carried by the envelope.** Until 0.3.x the copy embedded in
+  `EncryptedPayload.WrappedDek` was the sole source of truth at decrypt time, and
+  `EncryptedPayload.KeyId` was documented as audit-only. It is now the primary lookup key:
+
+  ```csharp
+  // 0.3.x — one path
+  Dek dek = await dekManager.GetDekByWrappedKeyAsync(payload.WrappedDek, ct);
+
+  // 0.4.0 — store first, envelope copy as the fallback
+  Dek dek = await dekManager.GetDekByKeyIdAsync(payload.KeyId, scope, ct);   // (1)
+  // ... on ANY failure of (1), including a record that unwraps but fails the tag check:
+  Dek dek = await dekManager.GetDekByWrappedKeyAsync(payload.WrappedDek, ct); // (2)
+  ```
+
+  **Why.** Moving a KEK is impossible (a Vault Transit key is `exportable=false`), so
+  splitting one `transit/` mount into one per zone means re-encrypting every DEK. With the
+  old order that meant rewriting every persisted envelope — for one consumer, ~2456 rows, a
+  nullable column on three tables, an EF migration, a maintenance window, and an
+  interrupted-halfway state in which rows are unreadable. With the new order it means
+  updating the store's **one record per DEK** (2 records for that consumer, via
+  `IEncryptionKeyStore.UpdateWrappedKeyAsync`), and the order of the two operations no
+  longer matters.
+
+  **Why an inversion and not an error-driven retry.** The first design fell back to the
+  store when the unwrap failed. Measured on a live Vault with two mounts, a ciphertext from
+  one presented to the other:
+
+  | Case | Vault response |
+  |---|---|
+  | wrong mount (the case to detect) | `400` — `cipher: message authentication failed` |
+  | key does not exist (a real outage) | `400` — `encryption key not found` |
+  | permission refused | `403` — `permission denied` |
+  | witness, its own mount | success |
+
+  The status code does not separate the first two; only the wording does. A fallback keyed on
+  that wording would stop firing — silently — the day Vault rephrases it. Resolving from the
+  store first deletes the class of error instead of detecting it, so nothing in Vellum reads a
+  Vault message. The four responses are pinned as executable documentation in
+  `VaultMountMismatchResponseTests`.
+
+  **The fallback can only turn a failure into a success.** It covers two cases, not one:
+  *(a)* the store cannot serve the key (unknown `KeyId`, scope mismatch, store unreachable),
+  and *(b)* the store returns a record that then fails to unwrap or fails the AES-GCM
+  authentication tag check. Case (b) is the one that makes the reordering safe: a stale store
+  record does not return *nothing*, it returns key material that does not work — without (b)
+  a payload that decrypted in 0.3.x would start failing, and only at the moment someone read
+  an old row. Neither is caught on a backend's error text, and neither on the exception type:
+  the catch is unconditional. The single thing it inspects is the **caller's cancellation
+  token** — a real cancellation is re-thrown, while a `TaskCanceledException` raised by a
+  store whose `HttpClient` simply timed out (`EnableResilience = false`) is a store failure and
+  falls back like any other.
+
+  **When both paths fail**, the raised `CryptographicException` names both attempts **by the
+  type of each failure** and carries both causes in an inner `AggregateException`. A bare
+  "decryption failed" would send the reader hunting down one path when the other failed too —
+  but the original messages stay out of the message text: since 0.4.0 a store failure can be an
+  `NpgsqlException` carrying a host and port, a `SqlException` carrying a server name and SQL,
+  or an `HttpRequestException` carrying a Vault URL, and consumers routinely map a
+  `CryptographicException` to a client-visible "invalid input" response. The messages are on the
+  causes and in the log (EventIds 2001 and 2003).
+
+  **Nothing else changed**: `EncryptAsync`, `RewrapPayloadAsync`, the `EncryptedPayload`
+  record, the DI registrations and the options are untouched. There is deliberately no feature
+  flag — not because the fallback only fires where 0.3.x already threw (case *(b)* is exactly
+  an input that did **not** throw in 0.3.x: a wrong store record, which 0.3.x never consulted
+  and which decrypted fine off the envelope copy). The fallback exists precisely so that this
+  0.3.x success does not become a 0.4.0 failure, which leaves a flag with nothing to protect:
+  it would be either a device someone forgets to switch on, or an ornament.
+
+- **`EncryptedPayload.KeyId` is no longer audit-only.** A consumer that persists envelopes
+  field-by-field must persist it faithfully. An envelope carrying `Guid.Empty` still decrypts:
+  there is nothing to look up, so it goes straight to the envelope copy.
+
+- **Decryption now depends on `IEncryptionKeyStore`, hence usually on a database.** Free for a
+  backend that has just read the ciphertext out of that same database. **Not** free for a
+  consumer decrypting a portable envelope with no store reachable: the lookup is attempted,
+  throws, case (b) catches it, and the decrypt still succeeds off the envelope copy — but it
+  pays one wasted round-trip and two KEK calls instead of one for that decrypt. The store is
+  skipped entirely when the envelope carries no usable `(KeyId, scope)` pair — an empty
+  `KeyId`, or an empty scope, which format version 1 envelopes are allowed not to supply.
+
+  The fallback also absorbs a store-side scope mismatch, so the lookup adds **no** cross-tenant
+  control that 0.3.x did not have: scope separation stays enforced cryptographically by the
+  format version 2 associated data.
+
+### Added
+
+- **`VellumDecryptMetrics`** — four gauges on the meter `Vellum.Core.Decrypt`, so a migration
+  can be watched instead of guessed at:
+
+  | Instrument | Reads as |
+  |---|---|
+  | `vellum.decrypt.fallback.recovered` | the **remaining backlog**: rises per row whose store record could not decrypt but whose envelope copy could; flat once every record is rewrapped |
+  | `vellum.decrypt.fallback.failed` | a **genuine outage**: both paths tried, both failed |
+  | `vellum.decrypt.fallback.attempts` | the **cost**: each one means the KEK provider was called twice for that decrypt (the DEK cache amortises this from the second read of a key onwards) |
+  | `vellum.decrypt.store_lookup.skipped` | decrypts the store could never serve, so they are not invisible |
+
+  They are **gauges, not counters**, on purpose: a counter that is never incremented emits no
+  time series at all, so "no fallback happened" and "the metric pipeline is broken" would read
+  identically on a dashboard. Subscribe with OpenTelemetry's
+  `AddMeter(VellumDecryptMetrics.MeterName)`, or read the `*Total` properties directly. No DI
+  registration was added or changed.
+
+- Three new log events with stable, distinct `EventId`s so the outcomes can be alerted on
+  separately: `2001` a fallback was needed, `2002` it succeeded and therefore names a stale
+  store record to rewrap, `2003` both paths failed.
+
 ## [0.3.0] — 2026-09-25
 
 ### Added

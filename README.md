@@ -86,8 +86,11 @@ EncryptedPayload envelope = await encryptor.EncryptStringAsync("hello", scope: "
 string roundtrip          = await encryptor.DecryptStringAsync(envelope, scope: "tenant:42");
 ```
 
-The envelope carries its own wrapped DEK, so decryption is self-contained — no second
-DB round-trip. By default the ciphertext is also **bound to its scope** via AES-GCM
+The envelope carries its own wrapped DEK, so its own fields always suffice to decrypt it.
+Since 0.4.0 the decrypt resolves the DEK from the key store by `KeyId` first and uses that
+embedded copy as the fallback — see the [0.4.0 changelog entry](CHANGELOG.md) for what that
+buys (rewrapping one store record per DEK instead of every stored row) and what it costs (a
+decrypt normally touches the store). By default the ciphertext is also **bound to its scope** via AES-GCM
 associated data (envelope format version 2): decrypting requires the same scope, so an
 envelope copied between tenants fails the authentication tag check instead of decrypting.
 Opt out with `VellumOptions.BindScopeToCiphertext = false` if the scope is genuinely

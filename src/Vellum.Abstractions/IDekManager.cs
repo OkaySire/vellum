@@ -97,9 +97,11 @@ public interface IDekManager
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Self-contained envelopes still need a decrypt cache.</b>
-    /// <see cref="IPayloadEncryptor.DecryptAsync"/> reads <see cref="WrappedKey"/> off the
-    /// envelope itself — no store round-trip — but a naive implementation would still call
+    /// <b>Self-contained envelopes still need a decrypt cache.</b> Since 0.4.0 this method is the
+    /// <i>fallback</i> leg of <see cref="IPayloadEncryptor.DecryptAsync"/>, taken when
+    /// <see cref="GetDekByKeyIdAsync"/> cannot serve the payload's key id; it reads
+    /// <see cref="WrappedKey"/> off the envelope itself, with no store round-trip. A naive
+    /// implementation would still call
     /// <see cref="IKeyEncryptionProvider.UnwrapAsync"/> for every decrypt, turning the KEK
     /// provider (Vault, AWS KMS, Azure Key Vault, ...) into a per-message latency source.
     /// This method caches the unwrapped plaintext DEK keyed by a SHA-256 hash of
