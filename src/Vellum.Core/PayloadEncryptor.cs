@@ -209,6 +209,18 @@ public sealed partial class PayloadEncryptor(
     {
         ArgumentNullException.ThrowIfNull(payload);
 
+        // The denominator, counted HERE and nowhere else: first statement of the method body, ahead
+        // of every validation guard and of both resolution paths, so no exit can miss it — not the
+        // four early CryptographicException throws below, not a skipped store lookup, not the
+        // aggregate throw when both paths fail, not an OperationCanceledException escaping the
+        // filters. One increment per call, before anything can branch, is also the only placement
+        // that cannot double-count the decrypts that walk both paths. It deliberately sits AFTER
+        // ThrowIfNull: a null payload is a caller contract violation, not a decrypt attempt, and
+        // counting it would put a NullReferenceException-class bug into the denominator that the
+        // fallback rates are divided by. See VellumDecryptMetrics.DecryptsTotal for why the four
+        // fallback gauges cannot be read without this one.
+        VellumDecryptMetrics.RecordDecrypt();
+
         // Fail closed on unknown envelope formats BEFORE any crypto work (no DEK unwrap, no
         // KEK round-trip, no AES-GCM call). A future format may change the AAD, add key
         // commitment, or switch algorithms — interpreting its bytes under a known-version
