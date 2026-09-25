@@ -216,15 +216,88 @@ public sealed class AppRoleVaultTokenProviderTests
         handler.CapturedRequests.Should().HaveCount(1);
     }
 
+    /// <summary>
+    /// Fail closed (design principle 5) on a <c>.</c> or <c>..</c> segment in the AppRole mount.
+    /// Measured on the pre-fix code, a mount of <c>approle/../../v1/sys/health</c> posted the login
+    /// to <c>http://vault.test:8200/v1/v1/sys/health/login</c> instead of
+    /// <c>http://vault.test:8200/v1/auth/approle/login</c>: the dot segment survives the
+    /// per-segment escaping (it contains no character <c>Uri.EscapeDataString</c> escapes) and the
+    /// URI layer normalises it away. The login body carries <see cref="VaultOptions.RoleId"/> and
+    /// <see cref="VaultOptions.SecretId"/>, so the request must never leave at all.
+    /// </summary>
+    [Theory]
+    [InlineData("approle/../../v1/sys/health")]
+    [InlineData("..")]
+    [InlineData(".")]
+    [InlineData("approle/..")]
+    [InlineData("./approle")]
+    public async Task GetTokenAsync_DotOrDotDotSegmentInMount_ThrowsBeforeAnyHttpCall(string mount)
+    {
+        FakeHttpMessageHandler handler = new((request, ct) => Task.FromResult(LoginOk("hvs.t1")));
+        using AppRoleVaultTokenProvider provider = CreateProvider(handler, AppRoleOptions(mount: mount));
+
+        Func<Task> act = async () => await provider.GetTokenAsync(CancellationToken.None);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .Where(ex => ex.Message.Contains("AppRoleMount", StringComparison.Ordinal));
+        handler.CapturedRequests.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// The failure names the property and does not carry the rejected value, nor — a fortiori —
+    /// the AppRole credentials.
+    /// </summary>
+    [Fact]
+    public async Task GetTokenAsync_DotDotSegmentInMount_FailureCarriesNeitherValueNorCredentials()
+    {
+        FakeHttpMessageHandler handler = new((request, ct) => Task.FromResult(LoginOk("hvs.t1")));
+        using AppRoleVaultTokenProvider provider =
+            CreateProvider(handler, AppRoleOptions(mount: "approle/../../v1/sys/health"));
+
+        Func<Task> act = async () => await provider.GetTokenAsync(CancellationToken.None);
+
+        string message = (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Message;
+        message.Should().NotContain("sys/health");
+        message.Should().NotContain("secret-456");
+        message.Should().NotContain("role-123");
+    }
+
+    /// <summary>
+    /// The witness for the rejection above: dots INSIDE a segment are legitimate and still work,
+    /// so the rule bans the relative segment rather than the character.
+    /// </summary>
+    [Theory]
+    [InlineData("approle.v2")]
+    [InlineData("..approle")]
+    [InlineData("...")]
+    public async Task GetTokenAsync_DotsInsideASegment_StillLogsIn(string mount)
+    {
+        FakeHttpMessageHandler handler = new((request, ct) => Task.FromResult(LoginOk("hvs.t1")));
+        using AppRoleVaultTokenProvider provider = CreateProvider(handler, AppRoleOptions(mount: mount));
+
+        string token = await provider.GetTokenAsync(CancellationToken.None);
+
+        token.Should().Be("hvs.t1");
+        handler.CapturedRequests[0].RequestUri!.AbsoluteUri
+            .Should().Be($"http://vault.test:8200/v1/auth/{mount}/login");
+    }
+
+    /// <summary>
+    /// <c>#</c>, not a space: <see cref="Uri"/> percent-encodes a raw space by itself, so a mount
+    /// of <c>"team a"</c> asserted as <c>team%20a</c> stays green even with the per-segment
+    /// <see cref="Uri.EscapeDataString(string)"/> removed from <c>BuildLoginPath</c> — it proves nothing.
+    /// A raw <c>#</c> would instead open a URI fragment and truncate the path at <c>/v1/auth/team</c>;
+    /// only the explicit escaping produces <c>team%23a</c>.
+    /// </summary>
     [Fact]
     public async Task GetTokenAsync_NestedMount_EscapesEachSegmentKeepingSlashes()
     {
         FakeHttpMessageHandler handler = new((request, ct) => Task.FromResult(LoginOk("hvs.t1")));
-        using AppRoleVaultTokenProvider provider = CreateProvider(handler, AppRoleOptions(mount: "team a/approle"));
+        using AppRoleVaultTokenProvider provider = CreateProvider(handler, AppRoleOptions(mount: "team#a/approle"));
 
         _ = await provider.GetTokenAsync(CancellationToken.None);
 
         handler.CapturedRequests[0].RequestUri!.AbsoluteUri
-            .Should().Be("http://vault.test:8200/v1/auth/team%20a/approle/login");
+            .Should().Be("http://vault.test:8200/v1/auth/team%23a/approle/login");
     }
 }

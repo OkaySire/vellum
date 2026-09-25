@@ -41,6 +41,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TransitMount` is unrelated to `AppRoleMount`: the latter is an `auth/` mount used to
   obtain a token, the former a `secrets` mount used to wrap and unwrap DEKs.
 
+### Security
+
+- **A `.` or `..` segment in `TransitMount` or `AppRoleMount` is now rejected**, both at
+  `ValidateOnStart()` and in the request-path builders (the path a provider composed by
+  hand takes, which bypasses the validator). A mount is a secrets-engine or auth-method
+  name, never a relative path.
+
+  The segments were previously escaped one by one, but neither `.` nor `..` contains a
+  character `Uri.EscapeDataString` escapes: the segment survived escaping and the URI layer
+  then normalised the path away, sending the request to a Vault endpoint other than the
+  configured mount. Measured on the pre-fix code:
+
+  | Configured mount | Request actually issued |
+  |---|---|
+  | `TransitMount = "transit/../auth/token"` | `POST /v1/auth/token/encrypt/{key}` |
+  | `TransitMount = "transit"` (witness) | `POST /v1/transit/encrypt/{key}` |
+  | `AppRoleMount = "approle/../../v1/sys/health"` | `POST /v1/v1/sys/health/login` — carrying `RoleId` and `SecretId` |
+  | `AppRoleMount = "approle"` (witness) | `POST /v1/auth/approle/login` |
+
+  Both failures name the property and never echo the rejected value, matching the rule the
+  validator already applied to `Address`. Dots *inside* a segment stay legitimate:
+  `transit.v2`, `..transit` and `...` are still accepted — the rule bans the relative
+  segment, not the character.
+
 ## [0.2.0] — 2026-06-12
 
 Remediation release driven by a full security + rotation review after the VPS
