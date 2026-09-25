@@ -33,10 +33,19 @@ namespace Vellum.Vault.Tests;
 /// table from being lost to a plan document nobody re-reads.
 /// </para>
 /// <para>
-/// <b>Known gap.</b> The exact Vault build these four responses were observed on was not recorded
-/// alongside the measurement (dated 2026-09-25). The wording of a Vault error is version-specific,
-/// so if this table is ever used for anything beyond "the wording is the only discriminator, do not
-/// rely on it", the version has to be obtained from infra first.
+/// <b>Which Vault said this.</b> The reference is the image digest, not the version number:
+/// <c>hashicorp/vault@sha256:4e33b126a59c0c333b76fb4e894722462659a6bec7c48c9ee8cea56fccfd2569</c>.
+/// That digest reads as Vault <c>v1.21.4</c> (commit <c>ffe7023c481dc1ea2d8550bbaca8d85f8e611e0b</c>,
+/// built 2026-03-04) — which is the human-readable label only. Infra's <c>latest</c> tag moved under
+/// it between two runs on the same day, and a version tag can always be re-pushed; a digest cannot.
+/// Cite the digest when re-measuring.
+/// </para>
+/// <para>
+/// <b>Development image, not necessarily production.</b> That is the build measured on 2026-09-25 on
+/// the development Vault. Infra has not checked which build production runs and says so. Vault error
+/// wording is version-specific, so should the two ever differ it is production's wording that
+/// counts, and this table then describes only the dev image. Nothing in Vellum breaks either way —
+/// see the previous paragraph: no code path reads these strings.
 /// </para>
 /// </remarks>
 public sealed class VaultMountMismatchResponseTests
