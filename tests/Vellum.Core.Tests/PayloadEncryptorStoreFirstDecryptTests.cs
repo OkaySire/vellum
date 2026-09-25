@@ -29,7 +29,7 @@ public sealed class PayloadEncryptorStoreFirstDecryptTests
 
     private static (PayloadEncryptor Encryptor, DekManager Manager) Build(
         FakeKeyEncryptionProvider provider,
-        FakeEncryptionKeyStore store,
+        IEncryptionKeyStore store,
         VellumDekCache cache)
     {
         CountingRandomBytesProvider random = new();
@@ -160,7 +160,10 @@ public sealed class PayloadEncryptorStoreFirstDecryptTests
     }
 
     /// <summary>
-    /// Case 3 of the plan: when both paths fail, the raised error must name both attempts.
+    /// Case 3 of the plan: when both paths fail, the raised error must name both attempts — by the
+    /// <b>type</b> of each failure, with the original messages left to the inner
+    /// <see cref="AggregateException"/> (see
+    /// <see cref="Decrypt_BothPathsFail_MessageLeaksNoInfrastructureDetail_ButCausesKeepIt"/>).
     /// </summary>
     /// <remarks>
     /// <b>Negative control.</b> Replace the aggregating <c>throw</c> in the second
@@ -201,12 +204,19 @@ public sealed class PayloadEncryptorStoreFirstDecryptTests
         error.Message.Should().Contain("BOTH", "an operator must not read this as a single failed path");
         error.Message.Should().Contain("(1) Key store lookup by KeyId threw");
         error.Message.Should().Contain("(2) Fallback to the wrapped DEK carried by the envelope also threw");
-        error.Message.Should().Contain("handle-the-provider-never-issued-store");
-        error.Message.Should().Contain("handle-the-provider-never-issued-envelope");
+        error.Message.Should().Contain(typeof(InvalidOperationException).FullName!, "each path is identified by the TYPE of its failure");
 
         AggregateException? causes = error.InnerException as AggregateException;
         causes.Should().NotBeNull("both originals must survive for the stack traces");
         causes!.InnerExceptions.Should().HaveCount(2);
+
+        // B3: the two attempts are distinguished on the CAUSES, not on the message. The previous
+        // version of this test asserted that the message quoted both handles — which are
+        // WrappedKey.Ciphertext values, exactly what EncryptedPayload.ToString exists to keep out of
+        // logs. A consumer writing their own IKeyEncryptionProvider against this test as a model
+        // would have reproduced the leak.
+        causes.InnerExceptions[0].Message.Should().Contain("handle-the-provider-never-issued-store");
+        causes.InnerExceptions[1].Message.Should().Contain("handle-the-provider-never-issued-envelope");
 
         VellumDecryptMetrics.FallbackFailedTotal.Should().Be(failedBefore + 1);
     }
@@ -322,5 +332,129 @@ public sealed class PayloadEncryptorStoreFirstDecryptTests
         VellumDecryptMetrics.FallbackAttemptsTotal.Should().Be(
             attemptsBefore,
             "a cancellation is not a store failure and must not buy a second KEK round-trip");
+    }
+
+    /// <summary>
+    /// B1: an <c>HttpClient</c> without a resilience pipeline signals a <b>timeout</b> with a
+    /// <see cref="TaskCanceledException"/>, which <i>is</i> an <see cref="OperationCanceledException"/>
+    /// even though nobody cancelled anything. Such a failure of the store path must be treated as a
+    /// store failure — counted, logged, and handed over to the envelope copy — not re-thrown as a
+    /// cancellation the caller never asked for.
+    /// </summary>
+    /// <remarks>
+    /// <b>Negative control.</b> Restore the exception filter of the store-first <c>catch</c> in
+    /// <c>PayloadEncryptor.DecryptAsync</c> to <c>when (ex is not OperationCanceledException)</c>
+    /// and this test fails with the <see cref="TaskCanceledException"/> escaping uncaught: the
+    /// fallback never runs, no metric moves, and the caller sees a cancellation.
+    /// </remarks>
+    [Fact]
+    public async Task Decrypt_StoreThrowsTimeoutShapedCancellation_CallerTokenNotCancelled_FallsBack()
+    {
+        FakeEncryptionKeyStore store = new();
+        FakeKeyEncryptionProvider provider = new();
+        byte[] plaintext = Encoding.UTF8.GetBytes("the store timed out, the envelope did not");
+
+        EncryptedPayload envelope;
+        using (VellumDekCache writeCache = new())
+        {
+            (PayloadEncryptor writer, _) = Build(provider, store, writeCache);
+            envelope = await writer.EncryptAsync(plaintext, Scope);
+        }
+
+        // Exactly the shape HttpClient produces on Timeout with EnableResilience = false: a
+        // TaskCanceledException wrapping a TimeoutException, and no cancelled token anywhere.
+        GetByIdFailingKeyStore timingOutStore = new(
+            store,
+            () => new TaskCanceledException(
+                "The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.",
+                new TimeoutException("A connection attempt timed out.")));
+
+        using VellumDekCache readCache = new();
+        (PayloadEncryptor reader, _) = Build(provider, timingOutStore, readCache);
+
+        long attemptsBefore = VellumDecryptMetrics.FallbackAttemptsTotal;
+        long recoveredBefore = VellumDecryptMetrics.FallbackRecoveredTotal;
+        long failedBefore = VellumDecryptMetrics.FallbackFailedTotal;
+
+        // Deliberately the default (never-cancellable) token: the caller cancelled nothing.
+        byte[] decrypted = await reader.DecryptAsync(envelope, Scope, CancellationToken.None);
+
+        decrypted.Should().Equal(plaintext);
+        timingOutStore.GetByIdCalls.Should().Be(1, "the store path was really the one that failed");
+        VellumDecryptMetrics.FallbackAttemptsTotal.Should().Be(
+            attemptsBefore + 1,
+            "a store timeout is a store failure and must be visible as a fallback attempt");
+        VellumDecryptMetrics.FallbackRecoveredTotal.Should().Be(recoveredBefore + 1);
+        VellumDecryptMetrics.FallbackFailedTotal.Should().Be(failedBefore);
+    }
+
+    /// <summary>
+    /// M1: when both paths fail, the <see cref="CryptographicException"/> message names the two
+    /// failure <b>types</b> and nothing else. Consumers routinely map a
+    /// <see cref="CryptographicException"/> to "invalid input / 400" and echo its message to the
+    /// client, and since 0.4.0 the store failure can be a database or HTTP exception whose message
+    /// carries a host, a port, a connection string fragment or a SQL statement.
+    /// </summary>
+    /// <remarks>
+    /// <b>Negative control.</b> Re-add <c>: {storeFailure.Message}</c> to the aggregated message in
+    /// <c>PayloadEncryptor.DecryptAsync</c> and the first assertion below fails: the endpoint
+    /// <c>10.0.0.5:5432</c> reappears in the message an API hands back. The second half of the test
+    /// is what stops the naive fix — deleting the causes instead of the leak — from passing.
+    /// </remarks>
+    [Fact]
+    public async Task Decrypt_BothPathsFail_MessageLeaksNoInfrastructureDetail_ButCausesKeepIt()
+    {
+        const string InfrastructureDetail = "Failed to connect to 10.0.0.5:5432";
+        const string EnvelopeHandle = "handle-the-provider-never-issued-envelope";
+
+        FakeEncryptionKeyStore store = new();
+        FakeKeyEncryptionProvider provider = new();
+
+        EncryptedPayload envelope;
+        using (VellumDekCache writeCache = new())
+        {
+            (PayloadEncryptor writer, _) = Build(provider, store, writeCache);
+            envelope = await writer.EncryptAsync(Encoding.UTF8.GetBytes("unreachable either way"), Scope);
+        }
+
+        // Stands in for NpgsqlException / SqlException / HttpRequestException: the type is
+        // irrelevant, the message shape is the point.
+        GetByIdFailingKeyStore leakyStore = new(
+            store,
+            () => new InvalidOperationException(InfrastructureDetail));
+
+        EncryptedPayload broken = envelope with
+        {
+            WrappedDek = new WrappedKey(Ciphertext: EnvelopeHandle, ProviderVersion: "v1"),
+        };
+
+        using VellumDekCache readCache = new();
+        (PayloadEncryptor reader, _) = Build(provider, leakyStore, readCache);
+
+        Func<Task> act = async () => await reader.DecryptAsync(broken, Scope);
+        ExceptionAssertions<CryptographicException> thrown = await act.Should().ThrowAsync<CryptographicException>();
+        CryptographicException error = thrown.Which;
+
+        error.Message.Should().NotContain(
+            InfrastructureDetail,
+            "a CryptographicException message is routinely echoed to an API client");
+        error.Message.Should().NotContain(
+            "10.0.0.5",
+            "not even the host on its own");
+        error.Message.Should().NotContain(
+            EnvelopeHandle,
+            "the envelope's WrappedKey.Ciphertext is a wrapped-DEK handle and must not travel in a message either");
+
+        // The other half: the causes must still be there, otherwise the assertions above would
+        // also pass on an implementation that simply lost the diagnosis.
+        AggregateException? causes = error.InnerException as AggregateException;
+        causes.Should().NotBeNull();
+        causes!.InnerExceptions.Should().HaveCount(2);
+        causes.InnerExceptions[0].Message.Should().Contain(
+            InfrastructureDetail,
+            "the operator needs the real store error, from the exception object and its log");
+        causes.InnerExceptions[1].Message.Should().Contain(
+            EnvelopeHandle,
+            "the provider's own wording survives in the cause");
     }
 }

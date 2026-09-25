@@ -173,11 +173,35 @@ public sealed partial class PayloadEncryptor(
     /// <see cref="PayloadEncryptor"/> for why the order is this way round, what the fallback
     /// covers, and what the resulting dependency on the store costs a consumer that has no store.
     /// </para>
+    /// <para>
+    /// <b>The thrown message carries no backend detail.</b> When both paths fail, the
+    /// <see cref="CryptographicException"/> message names only the two failure <i>types</i>. The
+    /// original messages — which may contain a host and port, a SQL statement, a Vault URL, or a
+    /// wrapped-DEK handle — are available on the inner <see cref="AggregateException"/> and in the
+    /// log (EventIds 2001 and 2003), deliberately not in the message, because consumers commonly map
+    /// a <see cref="CryptographicException"/> to a client-visible "invalid input" response.
+    /// </para>
+    /// <para>
+    /// <b>What cancellation means here.</b> A store-path failure is handed over to the envelope copy
+    /// unless <paramref name="cancellationToken"/> is actually cancelled. The exception type alone is
+    /// not the test: a bare <see cref="HttpClient"/> reports a timeout as a
+    /// <see cref="TaskCanceledException"/>, and a store that times out is a store failure, not a
+    /// cancellation the caller requested.
+    /// </para>
+    /// <para>
+    /// <b>Known consequence of the fallback (B2).</b> The catch around the store path is deliberately
+    /// unconditional, so it also absorbs <c>DekManager</c>'s internal cache invariant violation
+    /// ("This is a Vellum bug", logged <see cref="LogLevel.Critical"/> under EventId 1003): the
+    /// decrypt then succeeds off the envelope copy and the caller sees nothing. Confidentiality is
+    /// unaffected — the AES-GCM tag still gates every plaintext — but the <b>only</b> signal for that
+    /// invariant is the Critical log entry, not an exception at the call site. Operators must alert on
+    /// EventId 1003 rather than expect a failed decrypt.
+    /// </para>
     /// </remarks>
     [SuppressMessage(
         "Design",
         "CA1031:Do not catch general exception types",
-        Justification = "The store-first resolution is an optimisation over a self-contained envelope, not a control: ANY failure of the store path must hand over to the envelope's own wrapped DEK copy, which is exactly what 0.3.x used unconditionally. Narrowing the catch to Vellum's own exception types would leave a consumer whose store is unreachable (DbException, socket failure, ...) worse off than before the reordering, which is the one outcome this change must not produce. Cancellation is re-thrown by the filter, and the fail-closed guarantee is preserved: when both paths fail the method throws an aggregate naming both.")]
+        Justification = "The store-first resolution is an optimisation over a self-contained envelope, not a control: ANY failure of the store path must hand over to the envelope's own wrapped DEK copy, which is exactly what 0.3.x used unconditionally. Narrowing the catch to Vellum's own exception types would leave a consumer whose store is unreachable (DbException, socket failure, ...) worse off than before the reordering, which is the one outcome this change must not produce. A cancellation of the caller's OWN token is re-thrown by the filter — which tests the token rather than the exception type, so that a timeout-shaped TaskCanceledException from an HttpClient still falls back — and the fail-closed guarantee is preserved: when both paths fail the method throws an aggregate naming both failure types.")]
     public async Task<byte[]> DecryptAsync(
         EncryptedPayload payload,
         string scope,
@@ -245,7 +269,7 @@ public sealed partial class PayloadEncryptor(
                 LogPayloadDecrypted(_logger, payload.KeyId);
                 return plaintext;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 // Covers BOTH fallback cases with one catch, because both are the same thing from
                 // here: (a) the store could not serve the key at all, and (b) it served a record
@@ -257,6 +281,15 @@ public sealed partial class PayloadEncryptor(
                 // Note what is NOT inspected: the message. A wrong-mount Vault reply and a missing
                 // key are both HTTP 400 and differ only in wording; keying anything on that wording
                 // is exactly the fragility this reordering exists to delete.
+                //
+                // B1: the filter cannot be a bare `ex is not OperationCanceledException`. An
+                // HttpClient with no resilience pipeline (VaultOptions.EnableResilience = false)
+                // reports a TIMEOUT as a TaskCanceledException, which IS an
+                // OperationCanceledException although nobody cancelled anything. Such a store
+                // timeout would escape the fallback, uncounted and unlogged, and reach the caller
+                // as a cancellation of a token they never cancelled. What identifies a real
+                // cancellation is the caller's token, not the exception type — so that is what is
+                // tested, and only then is the exception re-thrown.
                 storeFailure = ex;
                 VellumDecryptMetrics.RecordFallbackAttempt();
                 LogStoreLookupFallback(_logger, payload.KeyId, ex);
@@ -287,17 +320,31 @@ public sealed partial class PayloadEncryptor(
             LogPayloadDecrypted(_logger, payload.KeyId);
             return plaintext;
         }
-        catch (Exception ex) when (storeFailure is not null && ex is not OperationCanceledException)
+        catch (Exception ex) when (storeFailure is not null && (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested))
         {
             // Both paths were tried and both failed: name both in the message. An operator reading
             // a bare "decryption failed" would assume a single path and go looking down the wrong
             // one. The AggregateException inner keeps the two originals intact for a stack trace.
+            //
+            // M1: the message names the two failure TYPES and nothing else — never the original
+            // messages. Since 0.4.0 the store failure can be any infrastructure exception
+            // (NpgsqlException with a host:port, SqlException with a server name and SQL text,
+            // HttpRequestException with a Vault URL), and this is a CryptographicException, a type
+            // many consumers map to "invalid input / 400" and echo straight back to the client. The
+            // envelope's WrappedKey.Ciphertext is likewise a wrapped-DEK handle that
+            // EncryptedPayload.ToString deliberately refuses to render, so a provider message
+            // quoting it must not travel here either. Diagnosis is not lost: both originals are in
+            // the inner AggregateException, and the store failure was already logged at EventId 2001
+            // with its own exception attached.
             VellumDecryptMetrics.RecordFallbackFailed();
             LogBothDekPathsFailed(_logger, payload.KeyId, ex);
             throw new CryptographicException(
                 $"Decryption failed for key {payload.KeyId} after BOTH DEK resolution paths were attempted. "
-                + $"(1) Key store lookup by KeyId threw {storeFailure.GetType().FullName}: {storeFailure.Message} "
-                + $"(2) Fallback to the wrapped DEK carried by the envelope also threw {ex.GetType().FullName}: {ex.Message}",
+                + $"(1) Key store lookup by KeyId threw {storeFailure.GetType().FullName}. "
+                + $"(2) Fallback to the wrapped DEK carried by the envelope also threw {ex.GetType().FullName}. "
+                + "The two original exceptions — including their messages — are preserved in the inner "
+                + "AggregateException and in the Vellum log (EventIds 2001 and 2003); they are kept out "
+                + "of this message because it may be surfaced to an untrusted caller.",
                 new AggregateException(storeFailure, ex));
         }
     }
