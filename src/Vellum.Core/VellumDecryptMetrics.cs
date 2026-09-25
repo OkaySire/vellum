@@ -45,6 +45,11 @@ namespace Vellum;
 ///     envelopes). Those decrypts can never be served by the store, so they do not appear in the
 ///     backlog signal above; this gauge keeps them from being invisible.
 ///   </description></item>
+///   <item><description>
+///     <c>vellum.decrypt.total</c> is the <i>denominator</i>, and none of the four above should be
+///     alerted on without it: a fallback gauge that stops rising reads the same whether the
+///     migration is done or nobody is decrypting any more. See <see cref="DecryptsTotal"/>.
+///   </description></item>
 /// </list>
 /// <para>
 /// <b>Static, not injected.</b> The instruments hang off a static <see cref="Meter"/> rather than an
@@ -93,6 +98,12 @@ public static class VellumDecryptMetrics
     /// </summary>
     public const string StoreLookupSkippedInstrumentName = "vellum.decrypt.store_lookup.skipped";
 
+    /// <summary>
+    /// Instrument name of the gauge reporting how many decrypts were attempted in total — the
+    /// <b>denominator</b> for the four gauges above.
+    /// </summary>
+    public const string DecryptsInstrumentName = "vellum.decrypt.total";
+
     private const string _decryptUnit = "{decrypt}";
 
     private static readonly Meter _meter = new(MeterName);
@@ -101,6 +112,7 @@ public static class VellumDecryptMetrics
     private static long _fallbackRecovered;
     private static long _fallbackFailed;
     private static long _storeLookupSkipped;
+    private static long _decrypts;
 
     static VellumDecryptMetrics()
     {
@@ -127,6 +139,12 @@ public static class VellumDecryptMetrics
             static () => Volatile.Read(ref _storeLookupSkipped),
             unit: _decryptUnit,
             description: "Decrypts where the key store was not consulted because the envelope carried no usable KeyId/scope pair.");
+
+        _ = _meter.CreateObservableGauge(
+            DecryptsInstrumentName,
+            static () => Volatile.Read(ref _decrypts),
+            unit: _decryptUnit,
+            description: "Decrypt calls attempted, on every resolution path and including the ones that threw. The denominator the four fallback gauges are read against.");
     }
 
     /// <summary>
@@ -149,6 +167,40 @@ public static class VellumDecryptMetrics
     /// </summary>
     public static long StoreLookupSkippedTotal => Volatile.Read(ref _storeLookupSkipped);
 
+    /// <summary>
+    /// Running process-local total behind <see cref="DecryptsInstrumentName"/>: every call to
+    /// <see cref="PayloadEncryptor.DecryptAsync"/>, whichever resolution path it took — store,
+    /// fallback, or skipped lookup — and <b>including the calls that threw</b>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What it is for: it is the denominator, and the other four gauges do not mean anything
+    /// without it.</b> During a KEK migration,
+    /// <see cref="FallbackRecoveredTotal"/> is expected to stop rising as the store records get
+    /// rewrapped and the DEK cache warms up. But a gauge that stops rising has two causes that look
+    /// identical on a dashboard: <i>the migration worked</i>, and <i>nothing is decrypting any
+    /// more</i> (the consumer was scaled to zero, the queue drained, a deployment broke the read
+    /// path). Read against this total, the two separate immediately: a flat recovered gauge over a
+    /// <b>rising</b> total is a finished migration; a flat recovered gauge over a <b>flat</b> total
+    /// is silence, and proves nothing at all. An operator who reads the fallback gauges alone reads
+    /// a silence as a success.
+    /// </para>
+    /// <para>
+    /// It also turns the other three into rates rather than raw magnitudes:
+    /// <c>fallback.attempts / total</c> is the fraction of decrypts paying double KEK traffic,
+    /// <c>fallback.failed / total</c> is the decrypt failure rate, and
+    /// <c>store_lookup.skipped / total</c> is the share of envelopes the store can never serve.
+    /// A count of 50 failures means nothing until it is known whether the process served 60 decrypts
+    /// or 6 million.
+    /// </para>
+    /// <para>
+    /// Failed calls are counted on purpose: leaving them out would make the denominator exclude
+    /// precisely the population the failure signal is about, and <c>failed / total</c> could then
+    /// never exceed the success rate.
+    /// </para>
+    /// </remarks>
+    public static long DecryptsTotal => Volatile.Read(ref _decrypts);
+
     internal static void RecordFallbackAttempt() => _ = Interlocked.Increment(ref _fallbackAttempts);
 
     internal static void RecordFallbackRecovered() => _ = Interlocked.Increment(ref _fallbackRecovered);
@@ -156,4 +208,6 @@ public static class VellumDecryptMetrics
     internal static void RecordFallbackFailed() => _ = Interlocked.Increment(ref _fallbackFailed);
 
     internal static void RecordStoreLookupSkipped() => _ = Interlocked.Increment(ref _storeLookupSkipped);
+
+    internal static void RecordDecrypt() => _ = Interlocked.Increment(ref _decrypts);
 }

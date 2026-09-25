@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-25
+
+Additive only: one new gauge and one new public property. No behaviour of encryption, decryption
+or rotation changed, and the four 0.4.0 gauges keep their exact semantics.
+
+### Added
+
+- **`vellum.decrypt.total` / `VellumDecryptMetrics.DecryptsTotal` — the denominator the four
+  0.4.0 gauges were missing.** Counts every call to `PayloadEncryptor.DecryptAsync`, on every
+  resolution path (store, fallback, skipped lookup) and **including the calls that throw**.
+
+  **Why.** During a KEK migration `vellum.decrypt.fallback.recovered` is expected to stop rising
+  as store records get rewrapped and the DEK cache warms. But a gauge that stops rising has two
+  causes that are indistinguishable on a dashboard: *the migration worked*, and *nothing is
+  decrypting any more* — a consumer scaled to zero, a drained queue, a broken read path. Read
+  against a total, the two separate at a glance: flat recovered over a **rising** total is a
+  finished migration; flat recovered over a **flat** total is silence, and proves nothing. It also
+  turns the other three into rates — `fallback.attempts / total` is the share of decrypts paying
+  double KEK traffic, `fallback.failed / total` is the decrypt failure rate — because 50 failures
+  mean nothing until it is known whether the process served 60 decrypts or 6 million.
+
+  Failed decrypts are counted deliberately: excluding them would leave the denominator without the
+  very population the failure signal is about. The increment sits at the head of `DecryptAsync`,
+  ahead of the four fail-closed validation guards, so envelope-format and nonce rejections are
+  counted too; it sits after the `ArgumentNullException.ThrowIfNull(payload)` contract check, which
+  is a caller bug rather than a decrypt attempt.
+
 ## [0.4.0] — 2026-09-25
 
 ### Changed

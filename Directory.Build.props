@@ -28,7 +28,7 @@
   </PropertyGroup>
 
   <PropertyGroup Label="Package metadata">
-    <VersionPrefix>0.4.0</VersionPrefix>
+    <VersionPrefix>0.4.1</VersionPrefix>
     <Authors>Vellum Contributors</Authors>
     <Company>Vellum</Company>
     <Product>Vellum</Product>
