@@ -156,9 +156,37 @@ public sealed partial class AppRoleVaultTokenProvider(
     /// individually so that mounts at nested paths (e.g. <c>team-a/approle</c>) keep their
     /// <c>/</c> separators while reserved characters inside a segment are transmitted safely.
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The mount is empty once normalised, or contains a <c>.</c> or <c>..</c> segment.
+    /// <c>VaultOptionsValidator</c> rejects both at start-up, but a provider composed by hand
+    /// bypasses the validator. A dot segment holds no character
+    /// <see cref="Uri.EscapeDataString(string)"/> escapes, so it survives the escaping and
+    /// <see cref="Uri"/> then normalises the path: measured, a mount of
+    /// <c>approle/../../v1/sys/health</c> posted the login to <c>/v1/v1/sys/health/login</c> —
+    /// carrying <see cref="VaultOptions.RoleId"/> and <see cref="VaultOptions.SecretId"/> to a
+    /// path other than the configured auth mount.
+    /// </exception>
     private static string BuildLoginPath(string mount)
     {
-        string[] segments = mount.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        string[] segments = (mount ?? string.Empty)
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (segments.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(VaultOptions)}.{nameof(VaultOptions.AppRoleMount)} must be a non-empty AppRole mount " +
+                "path (e.g. 'approle' or 'team-a/approle').");
+        }
+
+        // The rejected value is never echoed (same rule as VaultOptionsValidator).
+        if (VaultMountPath.HasRelativeSegment(segments))
+        {
+            throw new InvalidOperationException(
+                $"{nameof(VaultOptions)}.{nameof(VaultOptions.AppRoleMount)} must not contain a '.' or '..' path " +
+                "segment: an AppRole mount is an auth-method name (e.g. 'approle' or 'team-a/approle'), not a " +
+                "relative path.");
+        }
+
         string escapedMount = string.Join('/', segments.Select(Uri.EscapeDataString));
         return $"v1/auth/{escapedMount}/login";
     }

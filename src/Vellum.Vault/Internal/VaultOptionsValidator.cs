@@ -84,10 +84,25 @@ internal sealed class VaultOptionsValidator : IValidateOptions<VaultOptions>
                                  "acquired via AppRole login.");
                 }
 
-                if (string.IsNullOrWhiteSpace(options.AppRoleMount))
+                string[] appRoleMountSegments = (options.AppRoleMount ?? string.Empty)
+                    .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+                if (appRoleMountSegments.Length == 0)
                 {
                     failures.Add($"{nameof(VaultOptions.AppRoleMount)} must be a non-empty AppRole mount path " +
                                  "(e.g. 'approle').");
+                }
+                else if (VaultMountPath.HasRelativeSegment(appRoleMountSegments))
+                {
+                    // Same defect as TransitMount below, and worse in consequence: the login POST
+                    // carries RoleId and SecretId, so a normalised-away dot segment would send the
+                    // credentials to a path other than the configured auth mount. The offending
+                    // value is never echoed.
+                    failures.Add($"{nameof(VaultOptions.AppRoleMount)} must not contain a '.' or '..' path segment: " +
+                                 "an AppRole mount is an auth-method name (e.g. 'approle' or a nested " +
+                                 "'team-a/approle'), not a relative path. A dot segment would be normalised away by " +
+                                 "the URI layer and post the AppRole credentials to a different Vault path than the " +
+                                 "one configured.");
                 }
 
                 break;
@@ -113,12 +128,27 @@ internal sealed class VaultOptionsValidator : IValidateOptions<VaultOptions>
         // with a 404 that names no cause. Raise it here, where the message can name the property.
         // Surrounding slashes are NOT a failure: 'transit/' is normalised, not rejected — an
         // operator writing it has made no design mistake.
-        if (options.TransitMount is null ||
-            options.TransitMount.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length == 0)
+        string[] transitMountSegments = (options.TransitMount ?? string.Empty)
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (transitMountSegments.Length == 0)
         {
             failures.Add($"{nameof(VaultOptions.TransitMount)} must be a non-empty Transit secrets-engine mount " +
                          "path (e.g. 'transit', 'transit-zone-b', or a nested 'zone-b/transit'); leading and " +
                          "trailing slashes are optional and are normalised away.");
+        }
+        else if (VaultMountPath.HasRelativeSegment(transitMountSegments))
+        {
+            // A '.' or '..' segment is not merely useless: it holds no character that
+            // Uri.EscapeDataString escapes, so it survives the per-segment escaping in
+            // VaultKeyEncryptionProvider.BuildMountPath and Uri then normalises the path —
+            // measured, 'transit/../auth/token' issued a request to '/v1/auth/token/encrypt/{key}'.
+            // The offending value is never echoed (same rule as the Address failures above).
+            failures.Add($"{nameof(VaultOptions.TransitMount)} must not contain a '.' or '..' path segment: a " +
+                         "Transit mount is a secrets-engine name (e.g. 'transit', 'transit-zone-b', or a nested " +
+                         "'zone-b/transit'), not a relative path. A dot segment would be normalised away by the " +
+                         "URI layer and send wrap/unwrap calls to a different Vault endpoint than the one " +
+                         "configured.");
         }
 
         if (options.HttpTimeout <= TimeSpan.Zero)

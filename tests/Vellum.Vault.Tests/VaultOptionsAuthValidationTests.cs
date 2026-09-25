@@ -108,6 +108,32 @@ public sealed class VaultOptionsAuthValidationTests
         ex.Failures.Should().Contain(f => f.Contains("AppRoleMount", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// A <c>.</c> or <c>..</c> segment in the AppRole mount is rejected at start-up: it survives
+    /// the per-segment escaping in <c>AppRoleVaultTokenProvider.BuildLoginPath</c> and the URI layer
+    /// then normalises it away. Measured on the pre-fix code, <c>approle/../../v1/sys/health</c>
+    /// posted the login — <see cref="VaultOptions.RoleId"/> and
+    /// <see cref="VaultOptions.SecretId"/> included — to
+    /// <c>http://vault.test:8200/v1/v1/sys/health/login</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("approle/../../v1/sys/health")]
+    [InlineData("..")]
+    [InlineData(".")]
+    [InlineData("approle/..")]
+    [InlineData(" .. ")]
+    public void AppRole_DotOrDotDotSegmentInMount_FailsValidation(string mount)
+    {
+        OptionsValidationException ex = ValidationFailureFor(opts =>
+        {
+            ConfigureValidAppRole(opts);
+            opts.AppRoleMount = mount;
+        });
+
+        ex.Failures.Should().Contain(f => f.Contains("AppRoleMount", StringComparison.Ordinal));
+        ex.Failures.Should().NotContain(f => f.Contains("sys/health", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData(0.0)]
     [InlineData(-0.5)]

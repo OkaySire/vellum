@@ -266,9 +266,13 @@ public sealed partial class VaultKeyEncryptionProvider(
     /// <c>AppRoleVaultTokenProvider.BuildLoginPath</c>.
     /// </summary>
     /// <exception cref="InvalidOperationException">
-    /// The mount is empty once normalised. <c>VaultOptionsValidator</c> already rejects this at
-    /// start-up, but a provider composed by hand bypasses the validator: fail closed here rather
-    /// than issue <c>v1//encrypt/key</c> and let Vault answer a 404 that names no cause.
+    /// The mount is empty once normalised, or it contains a <c>.</c> or <c>..</c> segment.
+    /// <c>VaultOptionsValidator</c> already rejects both at start-up, but a provider composed by
+    /// hand bypasses the validator: fail closed here rather than issue <c>v1//encrypt/key</c> and
+    /// let Vault answer a 404 that names no cause, or — for a dot segment — issue a request that
+    /// <see cref="Uri"/> silently normalises onto a different Vault endpoint than the configured
+    /// mount (measured: <c>transit/../auth/token</c> resolved to <c>/v1/auth/token/encrypt/{key}</c>,
+    /// because <c>..</c> holds no character <see cref="Uri.EscapeDataString(string)"/> escapes).
     /// </exception>
     private static string BuildMountPath(string mount)
     {
@@ -280,6 +284,18 @@ public sealed partial class VaultKeyEncryptionProvider(
             throw new InvalidOperationException(
                 $"{nameof(VaultOptions)}.{nameof(VaultOptions.TransitMount)} must be a non-empty Transit mount " +
                 "path (e.g. 'transit' or 'zone-b/transit').");
+        }
+
+        // A Vault mount is an engine name, never a relative path: '.' and '..' are always an
+        // error. They must be rejected rather than escaped — escaping leaves them intact, and
+        // Uri then normalises the path, redirecting the call to another endpoint. The rejected
+        // value is never echoed (same rule as VaultOptionsValidator).
+        if (VaultMountPath.HasRelativeSegment(segments))
+        {
+            throw new InvalidOperationException(
+                $"{nameof(VaultOptions)}.{nameof(VaultOptions.TransitMount)} must not contain a '.' or '..' path " +
+                "segment: a Transit mount is an engine name (e.g. 'transit' or 'zone-b/transit'), not a " +
+                "relative path.");
         }
 
         return string.Join('/', segments.Select(Uri.EscapeDataString));

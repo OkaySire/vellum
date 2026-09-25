@@ -72,6 +72,73 @@ public sealed class VaultTransitMountValidationTests
     }
 
     /// <summary>
+    /// A <c>.</c> or <c>..</c> segment is rejected at start-up. It is not a harmless no-op: neither
+    /// dot segment contains a character that <c>Uri.EscapeDataString</c> escapes, so it survives
+    /// the per-segment escaping in <c>VaultKeyEncryptionProvider.BuildMountPath</c> and the URI
+    /// layer then normalises the path. Measured on the pre-fix code, <c>transit/../auth/token</c>
+    /// sent the wrap request to <c>http://vault.test:8200/v1/auth/token/encrypt/test-key</c>
+    /// instead of <c>.../v1/transit/encrypt/test-key</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("transit/../auth/token")]
+    [InlineData("..")]
+    [InlineData(".")]
+    [InlineData("transit/..")]
+    [InlineData("transit/./x")]
+    [InlineData("/../transit/")]
+    [InlineData(" .. ")]
+    public void DotOrDotDotSegment_FailsValidation(string mount)
+    {
+        Action act = ActFor(opts =>
+        {
+            ConfigureValid(opts);
+            opts.TransitMount = mount;
+        });
+
+        OptionsValidationException ex = act.Should().Throw<OptionsValidationException>().Which;
+        ex.Failures.Should().Contain(f => f.Contains("TransitMount", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The failure names the property but never carries the rejected value — the same rule the
+    /// validator applies to <see cref="VaultOptions.Address"/> via its <c>ScrubUserInfo</c> path.
+    /// </summary>
+    [Fact]
+    public void DotDotSegment_FailureMessageDoesNotCarryTheValue()
+    {
+        Action act = ActFor(opts =>
+        {
+            ConfigureValid(opts);
+            opts.TransitMount = "transit/../auth/token";
+        });
+
+        OptionsValidationException ex = act.Should().Throw<OptionsValidationException>().Which;
+        ex.Failures.Should().NotContain(f => f.Contains("auth/token", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The witness for the rejection above: a mount whose segments merely CONTAIN dots, without
+    /// being <c>.</c> or <c>..</c>, is still legitimate and must keep passing — otherwise the new
+    /// rule would be a blanket ban on the character rather than on the relative segment.
+    /// </summary>
+    [Theory]
+    [InlineData("transit.v2")]
+    [InlineData("..transit")]
+    [InlineData("transit..")]
+    [InlineData("zone-b/transit.v2")]
+    [InlineData("...")]
+    public void MountWithDotsInsideASegment_StillPassesValidation(string mount)
+    {
+        Action act = ActFor(opts =>
+        {
+            ConfigureValid(opts);
+            opts.TransitMount = mount;
+        });
+
+        act.Should().NotThrow();
+    }
+
+    /// <summary>
     /// The failure message must not blame <see cref="VaultOptions.AppRoleMount"/>: the two mounts
     /// are independent, and confusing them would send an operator to the auth configuration.
     /// </summary>

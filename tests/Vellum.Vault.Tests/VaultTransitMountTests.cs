@@ -188,11 +188,18 @@ public sealed class VaultTransitMountTests
         uri.Should().NotContain("%2F", "an internal slash must stay a separator, not be escaped");
     }
 
+    /// <summary>
+    /// <c>#</c>, not a space: <see cref="Uri"/> percent-encodes a raw space on its own, so a test
+    /// built on <c>"zone b"</c> → <c>zone%20b</c> stays green even with the per-segment
+    /// <see cref="Uri.EscapeDataString(string)"/> removed — it proves nothing about the escaping. A raw
+    /// <c>#</c> is instead read by <see cref="Uri"/> as the start of a fragment, truncating the
+    /// path at <c>/v1/zone</c>; only the explicit escaping yields <c>zone%23b</c>.
+    /// </summary>
     [Fact]
     public async Task WrapAsync_MountWithReservedCharacter_EscapesTheSegment()
     {
         VaultOptions options = BaseOptions();
-        options.TransitMount = "zone b/transit";
+        options.TransitMount = "zone#b/transit";
 
         FakeHttpMessageHandler handler = CiphertextHandler();
         VaultKeyEncryptionProvider provider = CreateProvider(handler, options);
@@ -200,7 +207,7 @@ public sealed class VaultTransitMountTests
         await provider.WrapAsync(_dek);
 
         handler.CapturedRequests[0].RequestUri!.AbsoluteUri
-            .Should().Be("http://vault.test:8200/v1/zone%20b/transit/encrypt/test-key");
+            .Should().Be("http://vault.test:8200/v1/zone%23b/transit/encrypt/test-key");
     }
 
     /// <summary>
@@ -226,6 +233,58 @@ public sealed class VaultTransitMountTests
         await act.Should().ThrowAsync<InvalidOperationException>()
             .Where(ex => ex.Message.Contains("TransitMount", StringComparison.Ordinal));
         handler.CapturedRequests.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Fail closed (design principle 5): a <c>.</c> or <c>..</c> segment is never a legitimate
+    /// Vault mount name, and it does not stay harmless. Measured on the pre-fix code, a mount of
+    /// <c>transit/../auth/token</c> produced the request URI
+    /// <c>http://vault.test:8200/v1/auth/token/encrypt/test-key</c>: each segment is escaped, but
+    /// <c>..</c> contains no character <see cref="Uri.EscapeDataString(string)"/> escapes, so
+    /// <see cref="Uri"/> then normalised the path and the call left for a different Vault endpoint
+    /// than the configured one. The witness for the same capture with a normal mount is
+    /// <c>http://vault.test:8200/v1/transit/encrypt/test-key</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("transit/../auth/token")]
+    [InlineData("..")]
+    [InlineData(".")]
+    [InlineData("transit/.")]
+    [InlineData("./transit")]
+    [InlineData("zone-b/../transit")]
+    public async Task WrapAsync_DotOrDotDotSegment_IsRejectedBeforeAnyHttpCall(string mount)
+    {
+        VaultOptions options = BaseOptions();
+        options.TransitMount = mount;
+
+        FakeHttpMessageHandler handler = CiphertextHandler();
+        VaultKeyEncryptionProvider provider = CreateProvider(handler, options);
+
+        Func<Task> act = () => provider.WrapAsync(_dek);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .Where(ex => ex.Message.Contains("TransitMount", StringComparison.Ordinal));
+        handler.CapturedRequests.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// The failure message must name the property and NOT carry the rejected value: the mount is
+    /// operator-supplied configuration, and the validator's existing rule (see
+    /// <c>VaultOptionsValidator.ScrubUserInfo</c>) is that no user-supplied value is echoed.
+    /// </summary>
+    [Fact]
+    public async Task WrapAsync_DotDotSegment_FailureMessageDoesNotCarryTheValue()
+    {
+        VaultOptions options = BaseOptions();
+        options.TransitMount = "transit/../auth/token";
+
+        FakeHttpMessageHandler handler = CiphertextHandler();
+        VaultKeyEncryptionProvider provider = CreateProvider(handler, options);
+
+        Func<Task> act = () => provider.WrapAsync(_dek);
+
+        (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Message
+            .Should().NotContain("auth/token");
     }
 
     // ---------------------------------------------------------------------
