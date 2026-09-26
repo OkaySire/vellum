@@ -11,11 +11,22 @@ namespace Vellum;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Gauges, not counters — on purpose.</b> A <see cref="Counter{T}"/> that is never incremented
-/// emits no time series at all, so "no fallback happened" and "the metric pipeline is broken" read
-/// identically on a dashboard. Every instrument here is an <see cref="ObservableGauge{T}"/> over a
-/// monotonically increasing process-local total, so a series exists — reporting <c>0</c> — from the
-/// first collection onwards.
+/// <b>Gauges for the four fallback signals, a counter for the total.</b> The four fallback
+/// instruments are <see cref="ObservableGauge{T}"/>s over a monotonically increasing process-local
+/// total: a <see cref="Counter{T}"/> that is never incremented emits no time series at all, so
+/// "no fallback happened" and "the metric pipeline is broken" would read identically on a
+/// dashboard. Those four therefore report <c>0</c> from the first collection onwards, and their
+/// mere presence is the proof that the meter is subscribed.
+/// </para>
+/// <para>
+/// <c>vellum.decrypt.total</c> is the exception and is a real <see cref="Counter{T}"/>: it is a
+/// cumulative count, the <c>.total</c> suffix is the one Prometheus reserves for counters, and any
+/// reader — human or alerting rule — will put a <c>rate()</c> on it. A monotonic <i>gauge</i> under
+/// a <c>rate()</c> does not raise an error, it returns a wrong number, and it cannot express a
+/// counter reset: after a pod restart the series drops back to 0 and nothing distinguishes that
+/// from traffic collapsing. Being a counter it stays silent until the first decrypt, which is
+/// harmless precisely because the four gauges above are already reporting <c>0</c> and therefore
+/// already prove the pipeline is alive.
 /// </para>
 /// <para>
 /// <b>What to alert on.</b>
@@ -56,6 +67,12 @@ namespace Vellum;
 /// <c>IMeterFactory</c> resolved from DI, so that turning the fallback path into an observable one
 /// required no change to Vellum's registration surface. Subscribe with
 /// <c>MeterListener</c>, or via OpenTelemetry's <c>AddMeter(VellumDecryptMetrics.MeterName)</c>.
+/// </para>
+/// <para>
+/// <b>Subscribing is not by itself enough to make the instruments exist</b> — see
+/// <see cref="EnsureInstrumentsPublished"/>, which <c>AddVellum</c> calls for you. A host that does
+/// not call <c>AddVellum</c> must call it itself, or it will see no Vellum series until the first
+/// decrypt.
 /// </para>
 /// <para>
 /// The <c>Total</c> properties expose the same values synchronously, for tests and for consumers
@@ -99,14 +116,22 @@ public static class VellumDecryptMetrics
     public const string StoreLookupSkippedInstrumentName = "vellum.decrypt.store_lookup.skipped";
 
     /// <summary>
-    /// Instrument name of the gauge reporting how many decrypts were attempted in total — the
-    /// <b>denominator</b> for the four gauges above.
+    /// Instrument name of the <see cref="Counter{T}"/> counting how many decrypts were attempted in
+    /// total — the <b>denominator</b> for the four gauges above. A counter, not a gauge, because it
+    /// is cumulative and is meant to be read through <c>rate()</c>.
     /// </summary>
     public const string DecryptsInstrumentName = "vellum.decrypt.total";
 
     private const string _decryptUnit = "{decrypt}";
 
     private static readonly Meter _meter = new(MeterName);
+
+    /// <summary>
+    /// The cumulative decrypt counter. Unlike the four observable gauges, a
+    /// <see cref="Counter{T}"/> has to be kept in a field because it is pushed to rather than
+    /// polled from — see <see cref="RecordDecrypt"/>.
+    /// </summary>
+    private static readonly Counter<long> _decryptCounter;
 
     private static long _fallbackAttempts;
     private static long _fallbackRecovered;
@@ -140,12 +165,52 @@ public static class VellumDecryptMetrics
             unit: _decryptUnit,
             description: "Decrypts where the key store was not consulted because the envelope carried no usable KeyId/scope pair.");
 
-        _ = _meter.CreateObservableGauge(
+        // A Counter, not an ObservableGauge: this one is cumulative and gets a rate() put on it.
+        // See the class remarks for why the four instruments above stay gauges and this one cannot.
+        _decryptCounter = _meter.CreateCounter<long>(
             DecryptsInstrumentName,
-            static () => Volatile.Read(ref _decrypts),
             unit: _decryptUnit,
             description: "Decrypt calls attempted, on every resolution path and including the ones that threw. The denominator the four fallback gauges are read against.");
     }
+
+    /// <summary>
+    /// Creates the <see cref="Meter"/> and publishes all five instruments, so that a collector
+    /// subscribed to <see cref="MeterName"/> sees them <b>from process startup</b> rather than from
+    /// the first decrypt. Idempotent, cheap, and safe to call from anywhere.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>DO NOT DELETE THIS METHOD OR ITS CALL SITE IN <c>AddVellum</c>. IT LOOKS LIKE DEAD CODE
+    /// AND IT IS NOT.</b> It takes no argument, returns nothing and has no visible effect, so it
+    /// reads exactly like something a tidy-up would remove. Removing it silently breaks
+    /// observability, with no compiler error and no test failure anywhere except
+    /// <c>Vellum.Core.MeterRegistration.Tests</c>, which exists for this single purpose.
+    /// </para>
+    /// <para>
+    /// <b>Why it is needed at all.</b> The instruments are published by this type's class
+    /// constructor, which the runtime only runs when something first <i>touches the type</i>. Until
+    /// 0.4.2 nothing on the registration path ever did: <see cref="MeterName"/> is a
+    /// <see langword="const"/>, so the recommended
+    /// <c>AddMeter(VellumDecryptMetrics.MeterName)</c> is inlined by the compiler to the bare
+    /// string <c>"Vellum.Core.Decrypt"</c> and never mentions the type in the emitted IL. The
+    /// meter was therefore built on the <i>first decrypt</i>, and a freshly started process
+    /// exported no Vellum series at all — leaving an operator unable to tell "wired up, nothing
+    /// decrypted yet" from "not wired up".
+    /// </para>
+    /// <para>
+    /// <b>Why not just make <see cref="MeterName"/> a <c>static readonly</c> field.</b> That would
+    /// fix <c>AddMeter(VellumDecryptMetrics.MeterName)</c> and nothing else. Passing the name as a
+    /// literal — <c>AddMeter("Vellum.Core.Decrypt")</c> — is an equally legitimate form, and the
+    /// only one available to a host that does not reference this package; it would still not touch
+    /// the type, and the defect would come back identically. An explicit call is the only form that
+    /// does not depend on how the consumer spells the meter name.
+    /// </para>
+    /// </remarks>
+    public static void EnsureInstrumentsPublished() =>
+        // Reading a static field of this type is what forces the class constructor above to run,
+        // and it has to be a *volatile* read so that neither Roslyn nor the JIT can elide it —
+        // eliding the read would elide the initialisation, which is the entire point of the call.
+        _ = Volatile.Read(ref _decrypts);
 
     /// <summary>
     /// Running process-local total behind <see cref="FallbackAttemptsInstrumentName"/>.
@@ -209,5 +274,18 @@ public static class VellumDecryptMetrics
 
     internal static void RecordStoreLookupSkipped() => _ = Interlocked.Increment(ref _storeLookupSkipped);
 
-    internal static void RecordDecrypt() => _ = Interlocked.Increment(ref _decrypts);
+    /// <summary>
+    /// Counts one decrypt attempt, on both instruments that report it: the exported
+    /// <see cref="Counter{T}"/> and the process-local total behind <see cref="DecryptsTotal"/>.
+    /// </summary>
+    /// <remarks>
+    /// Two instruments over one internal counter is the pattern already used by the four gauges: a
+    /// <see cref="Counter{T}"/> cannot be read back, and <see cref="DecryptsTotal"/> has to stay
+    /// readable for tests and for consumers publishing through their own metrics stack.
+    /// </remarks>
+    internal static void RecordDecrypt()
+    {
+        _ = Interlocked.Increment(ref _decrypts);
+        _decryptCounter.Add(1);
+    }
 }
