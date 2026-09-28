@@ -11,6 +11,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Vellum.Abstractions.Tests/Vellum.Abstractions.Tests.csproj" />
     <Project Path="tests/Vellum.Core.Tests/Vellum.Core.Tests.csproj" />
+    <Project Path="tests/Vellum.Core.MeterRegistration.Tests/Vellum.Core.MeterRegistration.Tests.csproj" />
     <Project Path="tests/Vellum.Vault.Tests/Vellum.Vault.Tests.csproj" />
     <Project Path="tests/Vellum.Static.Tests/Vellum.Static.Tests.csproj" />
     <Project Path="tests/Vellum.InMemory.Tests/Vellum.InMemory.Tests.csproj" />

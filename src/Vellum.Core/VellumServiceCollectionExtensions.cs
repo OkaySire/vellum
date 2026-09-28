@@ -8,6 +8,11 @@ namespace Vellum;
 /// </summary>
 /// <remarks>
 /// <para>
+/// <see cref="AddVellum"/> also calls
+/// <see cref="VellumDecryptMetrics.EnsureInstrumentsPublished"/>, so the decrypt instruments are
+/// exported from startup rather than from the first decrypt.
+/// </para>
+/// <para>
 /// <see cref="AddVellum"/> wires up <see cref="IDekManager"/>, <see cref="IPayloadEncryptor"/>,
 /// <see cref="VellumRewrapService"/>, <see cref="IRandomBytesProvider"/> and
 /// <see cref="TimeProvider"/> — plus the Vellum-owned
@@ -39,6 +44,13 @@ public static class VellumServiceCollectionExtensions
         Action<VellumOptions>? configureOptions = null)
     {
         ArgumentNullException.ThrowIfNull(services);
+
+        // NOT DEAD CODE — DO NOT REMOVE. This builds the decrypt Meter and publishes its five
+        // instruments now, at registration time, instead of on the first decrypt. Read
+        // EnsureInstrumentsPublished's own documentation before touching this line: it has no
+        // visible effect, which is exactly why it gets deleted by accident, and deleting it breaks
+        // observability with no compiler error. Guarded by Vellum.Core.MeterRegistration.Tests.
+        VellumDecryptMetrics.EnsureInstrumentsPublished();
 
         services.AddOptions<VellumOptions>();
         if (configureOptions is not null)

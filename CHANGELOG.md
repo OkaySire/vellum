@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-09-26
+
+### Changed — BREAKING for dashboards and alerting rules (no code change required)
+
+- **`vellum.decrypt.total` is now a counter (`Counter<long>`), where 0.4.1 exported it as a
+  monotonically increasing `ObservableGauge<long>`.** Nothing in the .NET API changed — the
+  instrument name, the meter name and `VellumDecryptMetrics.DecryptsTotal` are all untouched, and
+  no consumer code needs editing. What changes is **the shape of the exported series**, so a query
+  or panel written against 0.4.1 can keep working while returning a different number.
+
+  **What breaks, concretely.** Under the Prometheus exporter the series is no longer a gauge:
+
+  - a panel or rule reading `vellum_decrypt_total` as an **instantaneous value** ("how many
+    decrypts has this process served") now reads a counter. With OpenTelemetry's Prometheus
+    exporter the series keeps the same name and remains queryable, so **nothing errors** — but a
+    gauge panel plotting it now plots a cumulative counter, and any `avg`/`max`/`min` aggregation
+    across pods over it is meaningless.
+  - conversely, a `rate(vellum_decrypt_total[5m])` written against 0.4.1 was **already wrong** and
+    silently so: `rate()` over a gauge does not fail, it returns a wrong number, and it could not
+    detect the reset when a pod restarted and the series dropped back to 0. That query becomes
+    correct in 0.4.2 — its output will change, and that change is the fix.
+  - the metric now carries counter semantics in the exporter's metadata (`# TYPE ... counter`),
+    so any tool that validates types, or that reads OTLP directly, sees `Sum`/monotonic instead of
+    `Gauge`.
+
+  **What to write instead.**
+
+  | Intent | 0.4.1 (gauge) | 0.4.2 (counter) |
+  |---|---|---|
+  | Decrypt throughput | not expressible | `rate(vellum_decrypt_total[5m])` |
+  | Decrypts since start, one pod | `vellum_decrypt_total` | `vellum_decrypt_total` (unchanged) |
+  | Decrypts over a window | `max_over_time(...) - min_over_time(...)` | `increase(vellum_decrypt_total[1h])` |
+  | Fleet-wide throughput | `sum(vellum_decrypt_total)` (wrong on restart) | `sum(rate(vellum_decrypt_total[5m]))` |
+  | Fallback share | `vellum_decrypt_fallback_attempts / vellum_decrypt_total` | `rate(vellum_decrypt_fallback_attempts[5m]) / rate(vellum_decrypt_total[5m])` |
+
+  **Why.** `.total` is the suffix Prometheus reserves for counters, so every reader — human or
+  alerting rule — puts a `rate()` on it. A monotone *gauge* under `rate()` raises no error, it just
+  produces a false figure, and it cannot express a counter reset: after a pod restart the series
+  falls back to 0 and nothing distinguishes "restarted" from "traffic collapsed". This was a wrong
+  instrument kind, not a preference.
+
+  **The four fallback gauges are deliberately unchanged** — `vellum.decrypt.fallback.attempts`,
+  `.fallback.recovered`, `.fallback.failed` and `.store_lookup.skipped` remain
+  `ObservableGauge<long>`. A counter at zero exports no series at all, so for those four "nothing
+  happened" would become indistinguishable from "the pipeline is broken". They report `0` from the
+  first collection, and that is what makes the total's new silence-until-first-decrypt harmless.
+
+### Fixed
+
+- **The decrypt meter and its five instruments are now created when `AddVellum()` runs, instead of
+  on the first decrypt.** Before 0.4.2 a freshly started process exported **no Vellum metric at
+  all** until something decrypted, so an operator could not tell "wired up, nothing decrypted yet"
+  from "the metrics are not wired up".
+
+  **Root cause.** `VellumDecryptMetrics.MeterName` is a `const`, so the documented
+  `AddMeter(VellumDecryptMetrics.MeterName)` is inlined by the compiler to the literal
+  `"Vellum.Core.Decrypt"` and the emitted IL never mentions the type. Nothing else on the
+  registration path touched it either, so the static constructor that builds the `Meter` and
+  publishes the instruments did not run until `PayloadEncryptor.DecryptAsync` first called into it.
+
+- **New public API: `VellumDecryptMetrics.EnsureInstrumentsPublished()`**, called by `AddVellum()`.
+  Idempotent and cheap. Hosts that wire Vellum up **without** `AddVellum()` should call it once at
+  startup. Making `MeterName` a `static readonly` field was rejected as a fix: it would only repair
+  `AddMeter(VellumDecryptMetrics.MeterName)` and leave the equally legitimate
+  `AddMeter("Vellum.Core.Decrypt")` — the only form available to a host that does not reference this
+  package — broken in exactly the same way. `MeterName` therefore stays a `const`.
+
+  The method looks like dead code and is not: its only effect is to trigger the class constructor.
+  It is guarded by the dedicated single-test assembly `Vellum.Core.MeterRegistration.Tests`, whose
+  isolation is the point — a static class initialises once per process, so that test would pass
+  without the fix if it shared a process with anything that touches `VellumDecryptMetrics`.
+
 ## [0.4.1] — 2026-09-25
 
 Additive only: one new gauge and one new public property. No behaviour of encryption, decryption
